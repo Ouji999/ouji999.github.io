@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Police Command Center - Incident Management</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Leaflet CSS and JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  
+  <style>
+    .leaflet-container {
+      background: #1e293b !important;
+      font-family: 'Courier New', monospace;
+    }
+    .leaflet-tile-pane {
+      opacity: 0.7;
+    }
+    .resource-marker {
+      transition: all 0.2s;
+    }
+    .resource-marker:hover {
+      transform: scale(1.1);
+      z-index: 1000 !important;
+    }
+    .leaflet-bar a {
+      background-color: #1e293b !important;
+      color: #60a5fa !important;
+      border-color: #334155 !important;
+    }
+    .leaflet-bar a:hover {
+      background-color: #334155 !important;
+    }
+    .leaflet-control-attribution {
+      background: rgba(30, 41, 59, 0.8) !important;
+      color: #94a3b8 !important;
+      font-size: 10px !important;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .animate-spin {
+      animation: spin 1s linear infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const PoliceIncidentManagement = () => {
+      const [viewMode, setViewMode] = useState('map');
+      const [uploadedImage, setUploadedImage] = useState(null);
+      const [drawingMode, setDrawingMode] = useState(null);
+      const [resources, setResources] = useState([]);
+      const [isListening, setIsListening] = useState(false);
+      const [voiceCommand, setVoiceCommand] = useState('');
+      const [voiceSupported, setVoiceSupported] = useState(false);
+      const [voiceError, setVoiceError] = useState('');
+      const [aiAnalysis, setAiAnalysis] = useState([]);
+      const [selectedResource, setSelectedResource] = useState(null);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [showAnalysis, setShowAnalysis] = useState(false);
+      const [isSearching, setIsSearching] = useState(false);
+      
+      const [incidentData, setIncidentData] = useState({
+        incidentNumber: '',
+        type: '',
+        priority: 'medium',
+        status: 'active',
+        location: '',
+        reportedTime: new Date().toISOString().slice(0, 16),
+        description: '',
+        commander: '',
+        unitsAssigned: '',
+        casualties: '',
+        suspects: '',
+        witnesses: '',
+        evidence: '',
+        notes: ''
+      });
+
+      const leafletMapRef = useRef(null);
+      const mapContainerRef = useRef(null);
+      const recognitionRef = useRef(null);
+      const resourceMarkersRef = useRef({});
+
+      const resourceTypes = [
+        { id: 'officer', name: 'Officer', icon: '👮', color: '#3b82f6' },
+        { id: 'unit', name: 'Police Unit', icon: '🚔', color: '#60a5fa' },
+        { id: 'vehicle', name: 'Vehicle', icon: '🚗', color: '#93c5fd' },
+        { id: 'suspect', name: 'Suspect', icon: '⚠️', color: '#ef4444' },
+        { id: 'witness', name: 'Witness', icon: '👥', color: '#10b981' },
+        { id: 'evidence', name: 'Evidence', icon: '📷', color: '#f59e0b' },
+        { id: 'command', name: 'Command Post', icon: '📡', color: '#8b5cf6' }
+      ];
+
+      // Initialize Leaflet map
+      useEffect(() => {
+        if (!mapContainerRef.current || leafletMapRef.current) return;
+
+        console.log('Initializing Leaflet map...');
+        const map = L.map(mapContainerRef.current, {
+          zoomControl: false,
+        }).setView([40.7128, -74.0060], 13);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '© OpenStreetMap contributors',
+          maxZoom: 19,
+        }).addTo(map);
+
+        L.control.zoom({
+          position: 'topright'
+        }).addTo(map);
+
+        L.control.scale({
+          position: 'bottomleft',
+          metric: true,
+          imperial: true
+        }).addTo(map);
+
+        leafletMapRef.current = map;
+        console.log('Map initialized successfully');
+
+        return () => {
+          if (leafletMapRef.current) {
+            leafletMapRef.current.remove();
+            leafletMapRef.current = null;
+          }
+        };
+      }, []);
+
+      // Handle map clicks for resource placement
+      useEffect(() => {
+        if (!leafletMapRef.current) return;
+
+        const handleMapClick = (e) => {
+          if (drawingMode && drawingMode.startsWith('resource-')) {
+            const resourceType = drawingMode.replace('resource-', '');
+            addResourceAtLatLng(resourceType, e.latlng);
+            setDrawingMode(null);
+          }
+        };
+
+        leafletMapRef.current.on('click', handleMapClick);
+
+        return () => {
+          if (leafletMapRef.current) {
+            leafletMapRef.current.off('click', handleMapClick);
+          }
+        };
+      }, [drawingMode]);
+
+      // Initialize voice recognition
+      useEffect(() => {
+        // Check if we're on HTTPS or localhost
+        const isSecureContext = window.isSecureContext || 
+                               window.location.protocol === 'https:' || 
+                               window.location.hostname === 'localhost' ||
+                               window.location.hostname === '127.0.0.1';
+        
+        if (!isSecureContext) {
+          setVoiceError('Voice commands require HTTPS or localhost. Please serve this file via a web server.');
+          console.warn('Speech Recognition requires secure context (HTTPS or localhost)');
+          return;
+        }
+        
+        if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+          setVoiceError('Speech Recognition not supported in this browser. Try Chrome or Edge.');
+          console.warn('Speech Recognition API not available');
+          return;
+        }
+
+        try {
+          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          recognitionRef.current = new SpeechRecognition();
+          recognitionRef.current.continuous = true;
+          recognitionRef.current.interimResults = true;
+          recognitionRef.current.lang = 'en-US';
+
+          recognitionRef.current.onstart = () => {
+            console.log('Voice recognition started');
+            setVoiceSupported(true);
+            setVoiceError('');
+          };
+
+          recognitionRef.current.onresult = (event) => {
+            const transcript = Array.from(event.results)
+              .map(result => result[0].transcript)
+              .join('');
+            
+            setVoiceCommand(transcript);
+            processVoiceCommand(transcript);
+          };
+
+          recognitionRef.current.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            setIsListening(false);
+            
+            let errorMessage = '';
+            switch(event.error) {
+              case 'network':
+                errorMessage = 'Network error. Check your internet connection or use HTTPS.';
+                break;
+              case 'not-allowed':
+                errorMessage = 'Microphone permission denied. Please allow microphone access.';
+                break;
+              case 'no-speech':
+                errorMessage = 'No speech detected. Please try again.';
+                break;
+              case 'audio-capture':
+                errorMessage = 'No microphone found. Please connect a microphone.';
+                break;
+              case 'aborted':
+                errorMessage = 'Speech recognition aborted.';
+                break;
+              default:
+                errorMessage = `Speech recognition error: ${event.error}`;
+            }
+            setVoiceError(errorMessage);
+          };
+
+          recognitionRef.current.onend = () => {
+            console.log('Voice recognition ended');
+            if (isListening) {
+              // Restart if it was supposed to be listening
+              try {
+                recognitionRef.current.start();
+              } catch (e) {
+                console.error('Failed to restart recognition:', e);
+                setIsListening(false);
+              }
+            }
+          };
+
+          setVoiceSupported(true);
+        } catch (error) {
+          console.error('Failed to initialize speech recognition:', error);
+          setVoiceError('Failed to initialize speech recognition: ' + error.message);
+        }
+      }, []);
+
+      const addResourceAtLatLng = (type, latlng) => {
+        const newResource = {
+          id: Date.now(),
+          type,
+          lat: latlng.lat,
+          lng: latlng.lng,
+          label: `${type.toUpperCase()}-${resources.filter(r => r.type === type).length + 1}`,
+          timestamp: new Date().toISOString()
+        };
+        
+        const resourceType = resourceTypes.find(t => t.id === type);
+        
+        const customIcon = L.divIcon({
+          className: 'resource-marker',
+          html: `
+            <div style="
+              position: relative;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              cursor: grab;
+            ">
+              <div style="
+                background: ${resourceType.color}40;
+                border: 3px solid ${resourceType.color};
+                border-radius: 50%;
+                width: 48px;
+                height: 48px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 24px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+              ">
+                ${resourceType.icon}
+              </div>
+              <div style="
+                background: ${resourceType.color};
+                color: white;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+                margin-top: 4px;
+                white-space: nowrap;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+              ">
+                ${newResource.label}
+              </div>
+            </div>
+          `,
+          iconSize: [48, 72],
+          iconAnchor: [24, 60],
+        });
+
+        const marker = L.marker([latlng.lat, latlng.lng], {
+          icon: customIcon,
+          draggable: true,
+        }).addTo(leafletMapRef.current);
+
+        marker.on('dragend', (e) => {
+          const newLatLng = e.target.getLatLng();
+          setResources(prev => prev.map(r => 
+            r.id === newResource.id 
+              ? { ...r, lat: newLatLng.lat, lng: newLatLng.lng }
+              : r
+          ));
+        });
+
+        marker.on('click', () => {
+          setSelectedResource(newResource);
+        });
+
+        resourceMarkersRef.current[newResource.id] = marker;
+        setResources(prev => [...prev, newResource]);
+      };
+
+      const toggleVoiceRecognition = () => {
+        if (!voiceSupported || !recognitionRef.current) {
+          setVoiceError('Speech recognition not available. See requirements below.');
+          return;
+        }
+
+        if (isListening) {
+          try {
+            recognitionRef.current.stop();
+            setIsListening(false);
+            setVoiceCommand('');
+          } catch (error) {
+            console.error('Error stopping recognition:', error);
+          }
+        } else {
+          try {
+            recognitionRef.current.start();
+            setIsListening(true);
+            setVoiceError('');
+          } catch (error) {
+            console.error('Error starting recognition:', error);
+            setVoiceError('Failed to start: ' + error.message);
+          }
+        }
+      };
+
+      const processVoiceCommand = (transcript) => {
+        const lowerTranscript = transcript.toLowerCase();
+        
+        resourceTypes.forEach(type => {
+          if (lowerTranscript.includes(`place ${type.name.toLowerCase()}`) || 
+              lowerTranscript.includes(`add ${type.name.toLowerCase()}`)) {
+            if (leafletMapRef.current) {
+              const center = leafletMapRef.current.getCenter();
+              addResourceAtLatLng(type.id, center);
+            }
+          }
+        });
+
+        if (lowerTranscript.includes('analyze') || lowerTranscript.includes('analysis')) {
+          performAIAnalysis();
+        }
+
+        if (lowerTranscript.includes('clear all') || lowerTranscript.includes('reset')) {
+          clearAllResources();
+        }
+
+        if (lowerTranscript.includes('zoom in')) {
+          leafletMapRef.current?.zoomIn();
+        }
+
+        if (lowerTranscript.includes('zoom out')) {
+          leafletMapRef.current?.zoomOut();
+        }
+      };
+
+      const clearAllResources = () => {
+        Object.values(resourceMarkersRef.current).forEach(marker => {
+          marker.remove();
+        });
+        resourceMarkersRef.current = {};
+        setResources([]);
+        setAiAnalysis([]);
+        setSelectedResource(null);
+      };
+
+      const calculateDistanceKm = (lat1, lng1, lat2, lng2) => {
+        const R = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLng = (lng2 - lng1) * Math.PI / 180;
+        const a = 
+          Math.sin(dLat/2) * Math.sin(dLat/2) +
+          Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+          Math.sin(dLng/2) * Math.sin(dLng/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+      };
+
+      const performAIAnalysis = () => {
+        const analysis = [];
+        
+        const officers = resources.filter(r => r.type === 'officer' || r.type === 'unit');
+        const suspects = resources.filter(r => r.type === 'suspect');
+        const witnesses = resources.filter(r => r.type === 'witness');
+        const evidence = resources.filter(r => r.type === 'evidence');
+
+        officers.forEach(officer => {
+          suspects.forEach(suspect => {
+            const distanceKm = calculateDistanceKm(officer.lat, officer.lng, suspect.lat, suspect.lng);
+            const meters = Math.round(distanceKm * 1000);
+            
+            let status = 'safe';
+            let color = '#10b981';
+            if (meters < 50) {
+              status = 'critical';
+              color = '#ef4444';
+            } else if (meters < 200) {
+              status = 'caution';
+              color = '#f59e0b';
+            }
+
+            analysis.push({
+              type: 'distance',
+              message: `${officer.label} is ${meters}m from ${suspect.label}`,
+              status,
+              color,
+              priority: meters < 50 ? 'high' : meters < 200 ? 'medium' : 'low'
+            });
+          });
+        });
+
+        if (officers.length > 0 && suspects.length > 0) {
+          const ratio = officers.length / suspects.length;
+          if (ratio < 1) {
+            analysis.push({
+              type: 'coverage',
+              message: `INSUFFICIENT COVERAGE: ${officers.length} officers for ${suspects.length} suspects`,
+              status: 'warning',
+              color: '#f59e0b',
+              priority: 'high'
+            });
+          } else if (ratio >= 2) {
+            analysis.push({
+              type: 'coverage',
+              message: `OPTIMAL COVERAGE: ${officers.length} officers deployed`,
+              status: 'safe',
+              color: '#10b981',
+              priority: 'low'
+            });
+          }
+        }
+
+        if (suspects.length > officers.length) {
+          analysis.push({
+            type: 'recommendation',
+            message: '⚠️ TACTICAL ALERT: Request additional units',
+            status: 'critical',
+            color: '#ef4444',
+            priority: 'high'
+          });
+        }
+
+        if (officers.length >= 4) {
+          analysis.push({
+            type: 'perimeter',
+            message: `✓ PERIMETER: ${officers.length}-point containment`,
+            status: 'safe',
+            color: '#10b981',
+            priority: 'low'
+          });
+        }
+
+        setAiAnalysis(analysis.sort((a, b) => {
+          const priorityOrder = { high: 0, medium: 1, low: 2 };
+          return priorityOrder[a.priority] - priorityOrder[b.priority];
+        }));
+        setShowAnalysis(true);
+      };
+
+      const handleSearch = async () => {
+        if (!searchQuery) {
+          alert('Please enter a location to search');
+          return;
+        }
+        
+        if (!leafletMapRef.current) {
+          alert('Map is not initialized yet. Please wait a moment and try again.');
+          return;
+        }
+        
+        setIsSearching(true);
+        
+        try {
+          console.log('Searching for:', searchQuery);
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&limit=1`,
+            {
+              headers: {
+                'User-Agent': 'PoliceCommandCenter/1.0'
+              }
+            }
+          );
+          
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          
+          const data = await response.json();
+          console.log('Search results:', data);
+          
+          if (data && data.length > 0) {
+            const { lat, lon, display_name } = data[0];
+            const latitude = parseFloat(lat);
+            const longitude = parseFloat(lon);
+            
+            console.log('Moving map to:', latitude, longitude);
+            
+            // Animate to the new location
+            leafletMapRef.current.flyTo([latitude, longitude], 16, {
+              duration: 1.5
+            });
+            
+            setIncidentData({ ...incidentData, location: display_name });
+            
+            // Add a marker at the searched location
+            const searchIcon = L.divIcon({
+              className: 'search-result-marker',
+              html: `
+                <div style="
+                  background: #3b82f6;
+                  border: 3px solid white;
+                  border-radius: 50%;
+                  width: 40px;
+                  height: 40px;
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+                  font-size: 24px;
+                  box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+                ">
+                  📍
+                </div>
+              `,
+              iconSize: [40, 40],
+              iconAnchor: [20, 40],
+            });
+            
+            L.marker([latitude, longitude], { icon: searchIcon })
+              .addTo(leafletMapRef.current)
+              .bindPopup(`<b>📍 Location:</b><br>${display_name}`)
+              .openPopup();
+          } else {
+            alert('Location not found. Please try:\n- A more specific address\n- City name\n- Landmark name\n- Coordinates (lat, lng)');
+          }
+        } catch (error) {
+          console.error('Geocoding error:', error);
+          alert(`Error searching for location: ${error.message}\n\nPlease check your internet connection and try again.`);
+        } finally {
+          setIsSearching(false);
+        }
+      };
+
+      const handleImageUpload = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            setUploadedImage(event.target.result);
+            setViewMode('image');
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const centerOnMyLocation = () => {
+        if (navigator.geolocation && leafletMapRef.current) {
+          navigator.geolocation.getCurrentPosition((position) => {
+            const { latitude, longitude } = position.coords;
+            leafletMapRef.current.setView([latitude, longitude], 15);
+            
+            L.marker([latitude, longitude])
+              .addTo(leafletMapRef.current)
+              .bindPopup('<b>Your Location</b>')
+              .openPopup();
+          });
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-900 text-gray-100 p-4">
+          <div className="mb-4 pb-4 border-b border-slate-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-bold text-blue-400 flex items-center gap-2">
+                  <span className="text-2xl">🛡️</span>
+                  POLICE COMMAND CENTER
+                </h1>
+                <p className="text-slate-400 text-sm mt-1">Tactical Incident Management System v2.0</p>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="text-right">
+                  <div className="text-xs text-slate-500">SYSTEM STATUS</div>
+                  <div className="flex items-center gap-2 text-green-400">
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                    <span className="font-mono">OPERATIONAL</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-slate-500">TIMESTAMP</div>
+                  <div className="font-mono text-sm">{new Date().toLocaleString()}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-4">
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                  <span>🗺️</span> VIEW MODE
+                </h3>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setViewMode('map')}
+                    className={`px-4 py-2 rounded transition font-semibold ${
+                      viewMode === 'map' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    LIVE MAP
+                  </button>
+                  <button
+                    onClick={() => setViewMode('image')}
+                    className={`px-4 py-2 rounded transition font-semibold ${
+                      viewMode === 'image' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    IMAGE
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                  <span>🔍</span> LOCATION SEARCH
+                </h3>
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+                      placeholder="e.g., Times Square, New York"
+                      className="flex-1 px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      onClick={handleSearch}
+                      disabled={isSearching}
+                      className={`px-4 py-2 rounded transition font-semibold ${
+                        isSearching 
+                          ? 'bg-slate-600 cursor-not-allowed' 
+                          : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      {isSearching ? <span className="animate-spin inline-block">🔄</span> : 'GO'}
+                    </button>
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    Try: "Times Square, NYC" or "Eiffel Tower, Paris"
+                  </div>
+                  <button
+                    onClick={centerOnMyLocation}
+                    className="w-full px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded transition text-sm flex items-center justify-center gap-2"
+                  >
+                    <span>📍</span> My Location
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                  <span>📤</span> BASE LAYER UPLOAD
+                </h3>
+                <label className="block">
+                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                  <div className="px-4 py-3 bg-slate-700 hover:bg-slate-600 rounded cursor-pointer text-center transition border border-slate-600">
+                    <div className="text-2xl mb-1">📤</div>
+                    <span className="text-sm">Upload Floor Plan</span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                  {isListening ? <span className="animate-pulse">🎤</span> : <span>🔇</span>}
+                  VOICE COMMANDS
+                  {voiceSupported && <span className="text-xs text-green-400">✓ Ready</span>}
+                </h3>
+                <button
+                  onClick={toggleVoiceRecognition}
+                  disabled={!voiceSupported}
+                  className={`w-full px-4 py-3 rounded transition font-semibold ${
+                    !voiceSupported 
+                      ? 'bg-slate-600 cursor-not-allowed text-slate-400'
+                      : isListening 
+                        ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse' 
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  }`}
+                >
+                  {!voiceSupported 
+                    ? '❌ NOT AVAILABLE' 
+                    : isListening 
+                      ? '🔴 LISTENING...' 
+                      : '▶️ START VOICE'}
+                </button>
+                
+                {voiceError && (
+                  <div className="mt-2 p-3 bg-red-900 border border-red-600 rounded text-xs text-red-200">
+                    <div className="font-semibold mb-1">⚠️ Error:</div>
+                    {voiceError}
+                  </div>
+                )}
+                
+                {!voiceSupported && !voiceError && (
+                  <div className="mt-2 p-3 bg-yellow-900 border border-yellow-600 rounded text-xs text-yellow-200">
+                    <div className="font-semibold mb-1">📋 Requirements:</div>
+                    <ul className="space-y-1 ml-3">
+                      <li>• Use Chrome or Edge browser</li>
+                      <li>• Serve via HTTPS or localhost</li>
+                      <li>• Allow microphone permission</li>
+                    </ul>
+                    <div className="mt-2 text-xs text-yellow-300">
+                      💡 To test locally: <code className="bg-yellow-950 px-1 rounded">python -m http.server 8000</code>
+                    </div>
+                  </div>
+                )}
+                
+                {voiceCommand && (
+                  <div className="mt-2 p-2 bg-slate-900 rounded text-xs font-mono text-green-400">
+                    {voiceCommand}
+                  </div>
+                )}
+                
+                {voiceSupported && (
+                  <div className="mt-3 text-xs text-slate-400 space-y-1">
+                    <div className="font-semibold text-slate-300">Commands:</div>
+                    <div>• "Place officer/suspect"</div>
+                    <div>• "Analyze situation"</div>
+                    <div>• "Zoom in/out"</div>
+                    <div>• "Clear all"</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                  <span>📍</span> RESOURCE PLACEMENT
+                </h3>
+                <div className="grid grid-cols-2 gap-2">
+                  {resourceTypes.map(type => (
+                    <button
+                      key={type.id}
+                      onClick={() => setDrawingMode(`resource-${type.id}`)}
+                      className={`px-3 py-2 rounded transition text-xs font-semibold flex items-center justify-center gap-2 ${
+                        drawingMode === `resource-${type.id}` ? 'bg-blue-600 text-white ring-2 ring-blue-400' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      }`}
+                      style={{ borderLeft: `3px solid ${type.color}` }}
+                    >
+                      <span className="text-lg">{type.icon}</span>
+                      {type.name}
+                    </button>
+                  ))}
+                </div>
+                {drawingMode && (
+                  <div className="mt-3 p-2 bg-blue-900 rounded text-xs text-blue-200">
+                    ✓ Click on map to place
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                  <span>🤖</span> AI ANALYSIS
+                </h3>
+                <button
+                  onClick={performAIAnalysis}
+                  className="w-full px-4 py-3 bg-purple-600 hover:bg-purple-700 rounded transition font-semibold mb-3"
+                >
+                  ⚡ ANALYZE
+                </button>
+                {showAnalysis && aiAnalysis.length > 0 && (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {aiAnalysis.map((analysis, index) => (
+                      <div
+                        key={index}
+                        className="p-3 rounded text-xs"
+                        style={{
+                          backgroundColor: `${analysis.color}20`,
+                          borderLeft: `3px solid ${analysis.color}`
+                        }}
+                      >
+                        <div className="font-semibold text-white mb-1 uppercase">
+                          {analysis.type}
+                        </div>
+                        <div className="text-slate-300">{analysis.message}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="col-span-2 space-y-4">
+              <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
+                <div className="bg-slate-900 px-4 py-2 border-b border-slate-700 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-blue-400">
+                    🗺️ SITUATION PICTURE - {viewMode.toUpperCase()}
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-500">Resources: {resources.length}</span>
+                    <button
+                      onClick={clearAllResources}
+                      className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition font-semibold"
+                    >
+                      🗑️ CLEAR
+                    </button>
+                  </div>
+                </div>
+                
+                {viewMode === 'map' ? (
+                  <div ref={mapContainerRef} style={{ height: '600px', width: '100%' }} />
+                ) : (
+                  <div className="relative bg-slate-900" style={{ height: '600px' }}>
+                    {uploadedImage ? (
+                      <img src={uploadedImage} alt="Base layer" className="absolute inset-0 w-full h-full object-contain opacity-70" />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-slate-600">
+                        <div className="text-center">
+                          <div className="text-6xl mb-4">📤</div>
+                          <div className="text-sm">Upload floor plan or aerial image</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="bg-slate-900 px-4 py-2 border-t border-slate-700">
+                  <div className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-4 flex-wrap">
+                      {resourceTypes.map(type => {
+                        const count = resources.filter(r => r.type === type.id).length;
+                        return (
+                          <div key={type.id} className="flex items-center gap-1">
+                            <span className="text-lg">{type.icon}</span>
+                            <span className="text-slate-400">{type.name}:</span>
+                            <span className="font-semibold" style={{ color: type.color }}>{count}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="text-slate-500">
+                      Drag markers • Real coordinates • AI analysis
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                <h3 className="text-sm font-semibold text-blue-400 mb-4 flex items-center gap-2">
+                  <span>📋</span> INCIDENT INFORMATION
+                </h3>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Incident Number</label>
+                    <input
+                      type="text"
+                      value={incidentData.incidentNumber}
+                      onChange={(e) => setIncidentData({ ...incidentData, incidentNumber: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      placeholder="INC-2025-XXXX"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Type</label>
+                    <select
+                      value={incidentData.type}
+                      onChange={(e) => setIncidentData({ ...incidentData, type: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="">Select</option>
+                      <option value="armed-robbery">Armed Robbery</option>
+                      <option value="hostage">Hostage</option>
+                      <option value="assault">Assault</option>
+                      <option value="burglary">Burglary</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Priority</label>
+                    <select
+                      value={incidentData.priority}
+                      onChange={(e) => setIncidentData({ ...incidentData, priority: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Status</label>
+                    <select
+                      value={incidentData.status}
+                      onChange={(e) => setIncidentData({ ...incidentData, status: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="active">Active</option>
+                      <option value="responding">Responding</option>
+                      <option value="on-scene">On Scene</option>
+                      <option value="resolved">Resolved</option>
+                    </select>
+                  </div>
+
+                  <div className="col-span-2">
+                    <label className="block text-xs text-slate-400 mb-1">Location</label>
+                    <input
+                      type="text"
+                      value={incidentData.location}
+                      onChange={(e) => setIncidentData({ ...incidentData, location: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      placeholder="Address"
+                    />
+                  </div>
+
+                  <div className="col-span-2">
+                    <label className="block text-xs text-slate-400 mb-1">Description</label>
+                    <textarea
+                      value={incidentData.description}
+                      onChange={(e) => setIncidentData({ ...incidentData, description: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      rows="3"
+                      placeholder="Incident details..."
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 flex gap-2">
+                  <button className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition font-semibold">
+                    💾 SAVE
+                  </button>
+                  <button className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 rounded transition font-semibold">
+                    📄 EXPORT
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-4 border-t border-slate-700 flex items-center justify-between text-xs text-slate-500">
+            <div>System v2.0 | Leaflet Integration | User: COMMAND-01</div>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+              <span>Operational</span>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<PoliceIncidentManagement />);
+  </script>
+</body>
+</html>
