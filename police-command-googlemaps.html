@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Police Command Center - Google Maps</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Google Maps API - Replace YOUR_API_KEY with your actual Google Maps API key -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBtUSz3SkyBH5HeOEixb-Q2zmDiOLglLug&libraries=places,geometry"></script>
+  
+  <style>
+    .google-map-container {
+      width: 100%;
+      height: 600px;
+    }
+    .resource-marker {
+      transition: all 0.2s;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .animate-spin {
+      animation: spin 1s linear infinite;
+    }
+    @keyframes pulse-wave {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.05); }
+    }
+    .speech-active {
+      animation: pulse-wave 1.5s ease-in-out infinite;
+    }
+    .transcript-word {
+      display: inline-block;
+      animation: fadeIn 0.3s ease-in;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .search-result-item {
+      transition: all 0.2s;
+    }
+    .search-result-item:hover {
+      background-color: rgba(59, 130, 246, 0.2);
+      transform: translateX(4px);
+    }
+    .api-key-warning {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      border: 2px solid #fca5a5;
+      animation: pulse 2s ease-in-out infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const PoliceIncidentManagement = () => {
+      const [viewMode, setViewMode] = useState('map');
+      const [uploadedImage, setUploadedImage] = useState(null);
+      const [drawingMode, setDrawingMode] = useState(null);
+      const [resources, setResources] = useState([]);
+      const [isListening, setIsListening] = useState(false);
+      const [voiceCommand, setVoiceCommand] = useState('');
+      const [interimTranscript, setInterimTranscript] = useState('');
+      const [manualCommand, setManualCommand] = useState('');
+      const [voiceSupported, setVoiceSupported] = useState(false);
+      const [voiceError, setVoiceError] = useState('');
+      const [aiAnalysis, setAiAnalysis] = useState([]);
+      const [selectedResource, setSelectedResource] = useState(null);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [searchResults, setSearchResults] = useState([]);
+      const [showSearchResults, setShowSearchResults] = useState(false);
+      const [isSearching, setIsSearching] = useState(false);
+      const [currentLocation, setCurrentLocation] = useState('Singapore');
+      const [mapStyle, setMapStyle] = useState('roadmap');
+      const [commandHistory, setCommandHistory] = useState([]);
+      const [googleMapsReady, setGoogleMapsReady] = useState(false);
+      const [showApiKeyWarning, setShowApiKeyWarning] = useState(false);
+      
+      const [incidentData, setIncidentData] = useState({
+        incidentNumber: '',
+        type: '',
+        priority: 'medium',
+        status: 'active',
+        location: '',
+        reportedTime: new Date().toISOString().slice(0, 16),
+        description: '',
+        commander: '',
+        unitsAssigned: '',
+        casualties: '',
+        suspects: '',
+        witnesses: '',
+        evidence: '',
+        notes: ''
+      });
+
+      const googleMapRef = useRef(null);
+      const mapContainerRef = useRef(null);
+      const recognitionRef = useRef(null);
+      const resourceMarkersRef = useRef({});
+      const searchTimeoutRef = useRef(null);
+      const searchMarkerRef = useRef(null);
+      const geocoderRef = useRef(null);
+      const placesServiceRef = useRef(null);
+      const manualCommandInputRef = useRef(null);
+
+      const resourceTypes = [
+        { id: 'officer', name: 'Officer', icon: '👮', color: '#3b82f6' },
+        { id: 'unit', name: 'Police Unit', icon: '🚔', color: '#60a5fa' },
+        { id: 'vehicle', name: 'Vehicle', icon: '🚗', color: '#93c5fd' },
+        { id: 'suspect', name: 'Suspect', icon: '⚠️', color: '#ef4444' },
+        { id: 'witness', name: 'Witness', icon: '👥', color: '#10b981' },
+        { id: 'evidence', name: 'Evidence', icon: '📷', color: '#f59e0b' },
+        { id: 'command', name: 'Command Post', icon: '📡', color: '#8b5cf6' }
+      ];
+
+      // Initialize Google Maps
+      useEffect(() => {
+        if (!mapContainerRef.current || googleMapRef.current) return;
+
+        // Check if Google Maps API is loaded
+        if (typeof google === 'undefined' || !google.maps) {
+          console.error('Google Maps API not loaded');
+          setShowApiKeyWarning(true);
+          addAnalysis('Map Error', 'Google Maps API key not configured. Please add your API key.', '#ef4444');
+          return;
+        }
+
+        try {
+          console.log('Initializing Google Maps...');
+          
+          // Create map centered on Singapore
+          const map = new google.maps.Map(mapContainerRef.current, {
+            center: { lat: 1.3521, lng: 103.8198 },
+            zoom: 12,
+            mapTypeId: google.maps.MapTypeId.ROADMAP,
+            mapTypeControl: true,
+            mapTypeControlOptions: {
+              style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+              position: google.maps.ControlPosition.TOP_RIGHT,
+            },
+            zoomControl: true,
+            zoomControlOptions: {
+              position: google.maps.ControlPosition.RIGHT_TOP
+            },
+            streetViewControl: true,
+            fullscreenControl: true,
+          });
+
+          googleMapRef.current = map;
+          geocoderRef.current = new google.maps.Geocoder();
+          placesServiceRef.current = new google.maps.places.PlacesService(map);
+          
+          setGoogleMapsReady(true);
+          console.log('Google Maps initialized successfully');
+          addAnalysis('System Ready', 'Google Maps loaded successfully', '#10b981');
+
+          // Add click listener for resource placement
+          map.addListener('click', (event) => {
+            if (drawingMode && drawingMode.startsWith('resource-')) {
+              const resourceType = drawingMode.replace('resource-', '');
+              addResourceAtLatLng(resourceType, {
+                lat: event.latLng.lat(),
+                lng: event.latLng.lng()
+              });
+              setDrawingMode(null);
+            }
+          });
+
+        } catch (error) {
+          console.error('Error initializing Google Maps:', error);
+          setShowApiKeyWarning(true);
+          addAnalysis('Map Error', 'Failed to initialize Google Maps', '#ef4444');
+        }
+      }, []);
+
+      // Search using Google Places API
+      const searchLocation = async (query) => {
+        if (!query || query.trim().length < 2) {
+          setSearchResults([]);
+          setShowSearchResults(false);
+          return;
+        }
+
+        if (!googleMapsReady || !geocoderRef.current) {
+          addAnalysis('Search Error', 'Google Maps not ready', '#ef4444');
+          return;
+        }
+
+        setIsSearching(true);
+
+        try {
+          // First try geocoding
+          geocoderRef.current.geocode(
+            { 
+              address: query,
+              region: 'SG' // Bias results to Singapore
+            },
+            (results, status) => {
+              if (status === 'OK' && results && results.length > 0) {
+                const formattedResults = results.slice(0, 5).map(result => ({
+                  id: result.place_id,
+                  name: result.formatted_address,
+                  lat: result.geometry.location.lat(),
+                  lng: result.geometry.location.lng(),
+                  types: result.types,
+                  addressComponents: result.address_components
+                }));
+                
+                setSearchResults(formattedResults);
+                setShowSearchResults(true);
+                addAnalysis('Search Results', `Found ${results.length} location(s)`, '#10b981');
+              } else {
+                setSearchResults([]);
+                setShowSearchResults(false);
+                addAnalysis('Search', 'No results found', '#f59e0b');
+              }
+              setIsSearching(false);
+            }
+          );
+        } catch (error) {
+          console.error('Search error:', error);
+          addAnalysis('Search Error', 'Failed to search location', '#ef4444');
+          setIsSearching(false);
+        }
+      };
+
+      const handleSearchInput = (value) => {
+        setSearchQuery(value);
+        
+        if (searchTimeoutRef.current) {
+          clearTimeout(searchTimeoutRef.current);
+        }
+
+        searchTimeoutRef.current = setTimeout(() => {
+          searchLocation(value);
+        }, 400);
+      };
+
+      const selectSearchResult = (result) => {
+        if (!googleMapRef.current) return;
+
+        // Remove previous search marker if exists
+        if (searchMarkerRef.current) {
+          searchMarkerRef.current.setMap(null);
+        }
+
+        // Pan and zoom to location
+        googleMapRef.current.setCenter({ lat: result.lat, lng: result.lng });
+        googleMapRef.current.setZoom(17);
+
+        // Add search marker
+        searchMarkerRef.current = new google.maps.Marker({
+          position: { lat: result.lat, lng: result.lng },
+          map: googleMapRef.current,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 15,
+            fillColor: '#ef4444',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 3,
+          },
+          animation: google.maps.Animation.DROP
+        });
+
+        const infoWindow = new google.maps.InfoWindow({
+          content: `
+            <div style="color: black; padding: 8px;">
+              <div style="font-weight: bold; margin-bottom: 4px;">${result.name}</div>
+              <div style="font-size: 11px; color: #666;">
+                📍 ${result.lat.toFixed(6)}, ${result.lng.toFixed(6)}
+              </div>
+              <div style="font-size: 11px; color: #059669; margin-top: 4px;">
+                ✓ Click map to place resources here
+              </div>
+            </div>
+          `
+        });
+
+        searchMarkerRef.current.addListener('click', () => {
+          infoWindow.open(googleMapRef.current, searchMarkerRef.current);
+        });
+        
+        infoWindow.open(googleMapRef.current, searchMarkerRef.current);
+
+        setCurrentLocation(result.name);
+        setSearchQuery('');
+        setShowSearchResults(false);
+        setSearchResults([]);
+        
+        addAnalysis('Location Found', `📍 ${result.name}`, '#10b981');
+      };
+
+      // Parse and process commands
+      const processCommand = (command, source = 'manual') => {
+        if (!command || !command.trim()) return;
+
+        const trimmedCommand = command.trim();
+        const lowerCommand = trimmedCommand.toLowerCase();
+        
+        const historyEntry = {
+          text: trimmedCommand,
+          source: source,
+          timestamp: new Date().toLocaleTimeString(),
+          status: 'processing'
+        };
+        setCommandHistory(prev => [historyEntry, ...prev.slice(0, 19)]);
+
+        console.log(`Processing ${source} command:`, trimmedCommand);
+
+        if (lowerCommand.includes('clear') || lowerCommand.includes('remove all')) {
+          clearAllResources();
+          updateCommandStatus(historyEntry.timestamp, 'success');
+          addAnalysis(`${source === 'voice' ? 'Voice' : 'Manual'} Command`, 'Cleared all resources', '#10b981');
+        } 
+        else if (lowerCommand.includes('search') || lowerCommand.includes('find')) {
+          const searchMatch = lowerCommand.match(/(?:search|find)\s+(?:for\s+)?(.+)/);
+          if (searchMatch) {
+            const searchTerm = searchMatch[1].trim();
+            handleSearchInput(searchTerm);
+            updateCommandStatus(historyEntry.timestamp, 'success');
+            addAnalysis('Command', `Searching for: ${searchTerm}`, '#3b82f6');
+          }
+        }
+        else if (lowerCommand.includes('place') || lowerCommand.includes('add') || lowerCommand.includes('deploy')) {
+          let resourceType = null;
+          for (const type of resourceTypes) {
+            if (lowerCommand.includes(type.id) || lowerCommand.includes(type.name.toLowerCase())) {
+              resourceType = type.id;
+              break;
+            }
+          }
+
+          if (resourceType) {
+            const locationMatch = lowerCommand.match(/(?:at|on|near|in)\s+(.+)/);
+            if (locationMatch) {
+              const location = locationMatch[1].trim();
+              geocodeAndPlaceResource(resourceType, location);
+              updateCommandStatus(historyEntry.timestamp, 'success');
+            } else {
+              const center = googleMapRef.current.getCenter();
+              addResourceAtLatLng(resourceType, {
+                lat: center.lat(),
+                lng: center.lng()
+              });
+              updateCommandStatus(historyEntry.timestamp, 'success');
+            }
+          } else {
+            updateCommandStatus(historyEntry.timestamp, 'error');
+            addAnalysis('Command Error', 'Resource type not recognized', '#ef4444');
+          }
+        }
+        else if (lowerCommand.includes('status') || lowerCommand.includes('report')) {
+          const statusMsg = `${resources.length} resources deployed on map`;
+          addAnalysis('Status Report', statusMsg, '#3b82f6');
+          updateCommandStatus(historyEntry.timestamp, 'success');
+        }
+        else {
+          updateCommandStatus(historyEntry.timestamp, 'error');
+          addAnalysis('Unknown Command', `Could not process: "${trimmedCommand}"`, '#f59e0b');
+        }
+      };
+
+      const updateCommandStatus = (timestamp, status) => {
+        setCommandHistory(prev => 
+          prev.map(item => 
+            item.timestamp === timestamp ? { ...item, status } : item
+          )
+        );
+      };
+
+      const handleManualCommandSubmit = (e) => {
+        e.preventDefault();
+        if (!manualCommand.trim()) return;
+        processCommand(manualCommand, 'manual');
+        setManualCommand('');
+      };
+
+      const geocodeAndPlaceResource = async (resourceType, locationName) => {
+        if (!geocoderRef.current) return;
+
+        geocoderRef.current.geocode(
+          { address: locationName, region: 'SG' },
+          (results, status) => {
+            if (status === 'OK' && results && results[0]) {
+              const location = results[0].geometry.location;
+              addResourceAtLatLng(resourceType, {
+                lat: location.lat(),
+                lng: location.lng()
+              });
+              googleMapRef.current.setCenter(location);
+              googleMapRef.current.setZoom(16);
+              addAnalysis('Resource Placed', `${resourceType} at ${locationName}`, '#10b981');
+            } else {
+              const center = googleMapRef.current.getCenter();
+              addResourceAtLatLng(resourceType, {
+                lat: center.lat(),
+                lng: center.lng()
+              });
+              addAnalysis('Location Not Found', 'Placed at map center instead', '#f59e0b');
+            }
+          }
+        );
+      };
+
+      const addResourceAtLatLng = (resourceType, latlng) => {
+        const type = resourceTypes.find(t => t.id === resourceType);
+        if (!type || !googleMapRef.current) return;
+
+        const newResource = {
+          id: Date.now() + Math.random(),
+          type: resourceType,
+          lat: latlng.lat,
+          lng: latlng.lng,
+          name: `${type.name} ${resources.filter(r => r.type === resourceType).length + 1}`,
+          status: 'active',
+          timestamp: new Date().toISOString()
+        };
+
+        setResources(prev => [...prev, newResource]);
+
+        // Create custom marker with emoji
+        const marker = new google.maps.Marker({
+          position: { lat: latlng.lat, lng: latlng.lng },
+          map: googleMapRef.current,
+          draggable: true,
+          title: newResource.name,
+          label: {
+            text: type.icon,
+            fontSize: '24px',
+          },
+        });
+
+        const infoWindow = new google.maps.InfoWindow({
+          content: `
+            <div style="color: black; padding: 4px;">
+              <strong>${newResource.name}</strong><br/>
+              <small>Type: ${type.name}</small><br/>
+              <small>Lat: ${latlng.lat.toFixed(6)}</small><br/>
+              <small>Lng: ${latlng.lng.toFixed(6)}</small>
+            </div>
+          `
+        });
+
+        marker.addListener('click', () => {
+          infoWindow.open(googleMapRef.current, marker);
+          setSelectedResource(newResource);
+        });
+
+        marker.addListener('dragend', (event) => {
+          const newPos = {
+            lat: event.latLng.lat(),
+            lng: event.latLng.lng()
+          };
+          setResources(prev => prev.map(r => 
+            r.id === newResource.id 
+              ? { ...r, lat: newPos.lat, lng: newPos.lng }
+              : r
+          ));
+        });
+
+        resourceMarkersRef.current[newResource.id] = marker;
+      };
+
+      const clearAllResources = () => {
+        Object.values(resourceMarkersRef.current).forEach(marker => {
+          marker.setMap(null);
+        });
+        resourceMarkersRef.current = {};
+        setResources([]);
+        addAnalysis('Resources Cleared', 'All resources removed from map', '#f59e0b');
+      };
+
+      const addAnalysis = (type, message, color) => {
+        setAiAnalysis(prev => [{
+          type,
+          message,
+          color,
+          timestamp: new Date().toLocaleTimeString()
+        }, ...prev.slice(0, 9)]);
+      };
+
+      const changeMapStyle = (style) => {
+        if (!googleMapRef.current) return;
+        
+        const mapTypeId = style === 'satellite' ? google.maps.MapTypeId.SATELLITE :
+                         style === 'hybrid' ? google.maps.MapTypeId.HYBRID :
+                         style === 'terrain' ? google.maps.MapTypeId.TERRAIN :
+                         google.maps.MapTypeId.ROADMAP;
+        
+        googleMapRef.current.setMapTypeId(mapTypeId);
+        setMapStyle(style);
+        addAnalysis('Map Style', `Changed to ${style} view`, '#8b5cf6');
+      };
+
+      // Initialize voice recognition
+      useEffect(() => {
+        const isSecureContext = window.isSecureContext || 
+                               window.location.protocol === 'https:' || 
+                               window.location.hostname === 'localhost' ||
+                               window.location.hostname === '127.0.0.1';
+        
+        if (!isSecureContext) {
+          setVoiceError('Voice commands require HTTPS or localhost.');
+          return;
+        }
+        
+        if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+          setVoiceError('Speech Recognition not supported. Try Chrome or Edge.');
+          return;
+        }
+
+        try {
+          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          recognitionRef.current = new SpeechRecognition();
+          recognitionRef.current.continuous = true;
+          recognitionRef.current.interimResults = true;
+          recognitionRef.current.lang = 'en-US';
+
+          recognitionRef.current.onstart = () => {
+            setIsListening(true);
+            setVoiceSupported(true);
+            setVoiceError('');
+            setInterimTranscript('');
+          };
+
+          recognitionRef.current.onresult = (event) => {
+            let interim = '';
+            let final = '';
+
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              const transcript = event.results[i][0].transcript;
+              
+              if (event.results[i].isFinal) {
+                final += transcript;
+              } else {
+                interim += transcript;
+              }
+            }
+
+            setInterimTranscript(interim);
+
+            if (final) {
+              setVoiceCommand(final);
+              setInterimTranscript('');
+              
+              setTimeout(() => {
+                processCommand(final, 'voice');
+                setVoiceCommand('');
+              }, 500);
+            }
+          };
+
+          recognitionRef.current.onerror = (event) => {
+            if (event.error === 'no-speech') {
+              setVoiceError('No speech detected.');
+            } else if (event.error === 'not-allowed') {
+              setVoiceError('Microphone access denied.');
+            } else {
+              setVoiceError(`Error: ${event.error}`);
+            }
+            setIsListening(false);
+            setInterimTranscript('');
+          };
+
+          recognitionRef.current.onend = () => {
+            setIsListening(false);
+            setInterimTranscript('');
+          };
+
+          setVoiceSupported(true);
+        } catch (error) {
+          setVoiceError('Failed to initialize voice recognition');
+        }
+      }, []);
+
+      const toggleVoiceRecognition = () => {
+        if (!recognitionRef.current) return;
+
+        if (isListening) {
+          recognitionRef.current.stop();
+        } else {
+          try {
+            recognitionRef.current.start();
+            setVoiceError('');
+          } catch (error) {
+            setVoiceError('Could not start voice recognition');
+          }
+        }
+      };
+
+      const handleImageUpload = (event) => {
+        const file = event.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            setUploadedImage(e.target.result);
+            addAnalysis('Image Upload', 'Floor plan uploaded successfully', '#10b981');
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const quickSearchLocations = [
+        'Changi Airport',
+        'Marina Bay Sands',
+        'Orchard Road',
+        'Jurong East',
+        'Woodlands',
+        'Tampines'
+      ];
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
+          <div className="max-w-[1800px] mx-auto">
+            {/* API Key Warning */}
+            {showApiKeyWarning && (
+              <div className="api-key-warning rounded-lg p-4 mb-6 shadow-2xl">
+                <div className="flex items-start gap-3">
+                  <div className="text-3xl">⚠️</div>
+                  <div className="flex-1">
+                    <h3 className="text-lg font-bold text-white mb-2">Google Maps API Key Required</h3>
+                    <p className="text-sm text-white mb-3">
+                      To use Google Maps, you need to add your API key. Follow these steps:
+                    </p>
+                    <ol className="text-sm text-white space-y-2 mb-3 ml-4 list-decimal">
+                      <li>Go to <a href="https://console.cloud.google.com/google/maps-apis" target="_blank" className="underline font-semibold">Google Cloud Console</a></li>
+                      <li>Create a project and enable "Maps JavaScript API" and "Geocoding API"</li>
+                      <li>Create an API key in Credentials</li>
+                      <li>Replace <code className="bg-black/30 px-2 py-1 rounded">YOUR_API_KEY</code> in the HTML file with your actual key</li>
+                    </ol>
+                    <button 
+                      onClick={() => setShowApiKeyWarning(false)}
+                      className="px-4 py-2 bg-white text-red-600 rounded font-semibold hover:bg-gray-100 transition"
+                    >
+                      I Understand
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="mb-6 flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-bold mb-2 tracking-tight flex items-center gap-3">
+                  <span className="text-4xl">🚨</span>
+                  <span className="bg-gradient-to-r from-blue-400 to-blue-600 bg-clip-text text-transparent">
+                    POLICE COMMAND CENTER
+                  </span>
+                </h1>
+                <p className="text-slate-400 text-sm">Singapore • Google Maps • Voice + Manual Commands</p>
+              </div>
+              
+              <div className="flex items-center gap-4">
+                <div className="text-right text-xs text-slate-400">
+                  <div>{new Date().toLocaleDateString()}</div>
+                  <div className="font-mono">{new Date().toLocaleTimeString()}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="space-y-4">
+                {/* Manual Command Input */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-green-400 mb-3 flex items-center gap-2">
+                    <span>⌨️</span> MANUAL COMMAND INPUT
+                  </h3>
+                  
+                  <form onSubmit={handleManualCommandSubmit}>
+                    <div className="relative">
+                      <input
+                        ref={manualCommandInputRef}
+                        type="text"
+                        value={manualCommand}
+                        onChange={(e) => setManualCommand(e.target.value)}
+                        placeholder="Type command... (e.g., 'place officer at Changi Airport')"
+                        className="w-full px-4 py-3 bg-slate-900 border border-slate-600 rounded-lg text-sm focus:outline-none focus:border-green-500 pr-12"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!manualCommand.trim()}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed rounded text-xs font-semibold transition"
+                      >
+                        ▶
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="mt-3 text-xs text-slate-500 space-y-1">
+                    <div>💡 <span className="text-slate-400">Example commands:</span></div>
+                    <div className="ml-4 space-y-1">
+                      <div>• "place officer at Marina Bay"</div>
+                      <div>• "search Changi Airport Terminal 4"</div>
+                      <div>• "clear all"</div>
+                      <div>• "status"</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Voice Control */}
+                <div className={`bg-slate-800 rounded-lg p-4 border-2 transition-all ${
+                  isListening ? 'border-red-500 speech-active' : 'border-slate-700'
+                }`}>
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🎤</span> VOICE COMMANDS
+                  </h3>
+                  
+                  {voiceError && (
+                    <div className="bg-red-900/30 border border-red-500 rounded p-3 mb-3">
+                      <p className="text-xs text-red-300">{voiceError}</p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={toggleVoiceRecognition}
+                    disabled={!voiceSupported}
+                    className={`w-full px-4 py-3 rounded-lg font-semibold transition ${
+                      isListening
+                        ? 'bg-red-600 hover:bg-red-700'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    } disabled:bg-slate-600 disabled:cursor-not-allowed`}
+                  >
+                    {isListening ? '🔴 STOP LISTENING' : '🎤 START LISTENING'}
+                  </button>
+
+                  <div className="mt-3 bg-slate-900 rounded-lg p-3 min-h-[100px]">
+                    <div className="flex items-center gap-2 mb-2">
+                      {isListening && (
+                        <div className="flex gap-1">
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
+                        </div>
+                      )}
+                      <div className="text-xs text-slate-500">
+                        {isListening ? '🔴 Live Transcription:' : '⚫ Not listening'}
+                      </div>
+                    </div>
+                    
+                    {isListening && interimTranscript && (
+                      <div className="text-sm text-slate-400 italic mb-2 transcript-word">
+                        "{interimTranscript}"
+                      </div>
+                    )}
+                    
+                    {voiceCommand && (
+                      <div className="text-sm text-blue-300 font-semibold">
+                        ✓ "{voiceCommand}"
+                      </div>
+                    )}
+                    
+                    {!isListening && !voiceCommand && !interimTranscript && (
+                      <div className="text-xs text-slate-600 text-center py-6">
+                        Click START to begin voice commands
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Command History */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-purple-400 mb-3 flex items-center gap-2">
+                    <span>📜</span> COMMAND HISTORY
+                  </h3>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {commandHistory.length === 0 ? (
+                      <div className="text-xs text-slate-600 text-center py-4">
+                        No commands yet
+                      </div>
+                    ) : (
+                      commandHistory.map((cmd, index) => (
+                        <div key={index} className="bg-slate-900 p-2 rounded text-xs">
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                cmd.source === 'voice' ? 'bg-blue-900/50 text-blue-400' : 'bg-green-900/50 text-green-400'
+                              }`}>
+                                {cmd.source === 'voice' ? '🎤' : '⌨️'}
+                              </span>
+                              <span className="text-slate-500">{cmd.timestamp}</span>
+                            </div>
+                            <span className={`text-xs px-2 py-0.5 rounded ${
+                              cmd.status === 'success' ? 'bg-green-900/30 text-green-400' :
+                              cmd.status === 'error' ? 'bg-red-900/30 text-red-400' :
+                              'bg-yellow-900/30 text-yellow-400'
+                            }`}>
+                              {cmd.status === 'success' ? '✓' :
+                               cmd.status === 'error' ? '✗' : '⏳'}
+                            </span>
+                          </div>
+                          <div className="text-slate-300">"{cmd.text}"</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Location Search */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🔍</span> LOCATION SEARCH
+                  </h3>
+                  
+                  <div className="relative mb-3">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => handleSearchInput(e.target.value)}
+                      onFocus={() => searchQuery && setShowSearchResults(true)}
+                      placeholder="Search address or place..."
+                      className="w-full px-4 py-2 bg-slate-900 border border-slate-600 rounded-lg text-sm focus:outline-none focus:border-blue-500 pr-10"
+                    />
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                      {isSearching ? (
+                        <div className="animate-spin text-blue-400 text-lg">⟳</div>
+                      ) : (
+                        <div className="text-slate-500">🔍</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mb-3">
+                    <div className="text-xs text-slate-500 mb-2">Quick Search:</div>
+                    <div className="flex flex-wrap gap-1">
+                      {quickSearchLocations.map((location) => (
+                        <button
+                          key={location}
+                          onClick={() => handleSearchInput(location)}
+                          className="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs transition"
+                        >
+                          {location}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {showSearchResults && searchResults.length > 0 && (
+                    <div className="mb-3 bg-slate-900 border border-slate-600 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+                      {searchResults.map((result, index) => (
+                        <div
+                          key={result.id || index}
+                          onClick={() => selectSearchResult(result)}
+                          className="search-result-item px-4 py-3 cursor-pointer border-b border-slate-700 last:border-b-0"
+                        >
+                          <div className="text-sm text-white font-medium flex items-start gap-2">
+                            <span className="text-blue-400 mt-0.5">📍</span>
+                            <div className="flex-1">
+                              <div>{result.name}</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-3 pt-3 border-t border-slate-700">
+                    <div className="text-xs text-slate-400">
+                      <span className="text-slate-500">Current:</span> 
+                      <div className="text-blue-400 font-semibold mt-1">{currentLocation}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Resource Tools */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🛠️</span> RESOURCE TOOLS
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    {resourceTypes.map(type => (
+                      <button
+                        key={type.id}
+                        onClick={() => setDrawingMode(`resource-${type.id}`)}
+                        className={`px-3 py-2 rounded text-xs font-semibold transition ${
+                          drawingMode === `resource-${type.id}`
+                            ? 'bg-blue-600 border-2 border-blue-400'
+                            : 'bg-slate-700 hover:bg-slate-600 border-2 border-transparent'
+                        }`}
+                        style={{ 
+                          backgroundColor: drawingMode === `resource-${type.id}` ? type.color : undefined,
+                          borderColor: drawingMode === `resource-${type.id}` ? type.color : undefined
+                        }}
+                      >
+                        <div className="text-lg mb-1">{type.icon}</div>
+                        <div>{type.name}</div>
+                      </button>
+                    ))}
+                  </div>
+                  {drawingMode && (
+                    <div className="mt-3 text-xs text-center text-blue-400 bg-blue-900/30 rounded p-2">
+                      Click on map to place {drawingMode.replace('resource-', '')}
+                    </div>
+                  )}
+                </div>
+
+                {/* View Mode Toggle */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>👁️</span> VIEW MODE
+                  </h3>
+                  <div className="flex gap-2 mb-3">
+                    <button
+                      onClick={() => setViewMode('map')}
+                      className={`flex-1 px-4 py-2 rounded font-semibold transition ${
+                        viewMode === 'map' ? 'bg-blue-600' : 'bg-slate-700 hover:bg-slate-600'
+                      }`}
+                    >
+                      🗺️ MAP
+                    </button>
+                    <button
+                      onClick={() => setViewMode('floorplan')}
+                      className={`flex-1 px-4 py-2 rounded font-semibold transition ${
+                        viewMode === 'floorplan' ? 'bg-blue-600' : 'bg-slate-700 hover:bg-slate-600'
+                      }`}
+                    >
+                      🏢 FLOOR
+                    </button>
+                  </div>
+                  
+                  {viewMode === 'map' && (
+                    <div>
+                      <div className="text-xs text-slate-400 mb-2">Map Type:</div>
+                      <div className="grid grid-cols-2 gap-1">
+                        <button
+                          onClick={() => changeMapStyle('roadmap')}
+                          className={`px-2 py-1.5 rounded text-xs font-semibold transition ${
+                            mapStyle === 'roadmap' ? 'bg-blue-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                          }`}
+                        >
+                          🗺️ Map
+                        </button>
+                        <button
+                          onClick={() => changeMapStyle('satellite')}
+                          className={`px-2 py-1.5 rounded text-xs font-semibold transition ${
+                            mapStyle === 'satellite' ? 'bg-blue-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                          }`}
+                        >
+                          🛰️ Satellite
+                        </button>
+                        <button
+                          onClick={() => changeMapStyle('hybrid')}
+                          className={`px-2 py-1.5 rounded text-xs font-semibold transition ${
+                            mapStyle === 'hybrid' ? 'bg-blue-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                          }`}
+                        >
+                          🌍 Hybrid
+                        </button>
+                        <button
+                          onClick={() => changeMapStyle('terrain')}
+                          className={`px-2 py-1.5 rounded text-xs font-semibold transition ${
+                            mapStyle === 'terrain' ? 'bg-blue-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                          }`}
+                        >
+                          ⛰️ Terrain
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {viewMode === 'floorplan' && (
+                    <div>
+                      <label className="block w-full px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-center cursor-pointer transition font-semibold">
+                        📤 UPLOAD IMAGE
+                        <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {/* System Log */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-yellow-400 mb-3 flex items-center gap-2">
+                    <span>🤖</span> SYSTEM LOG
+                  </h3>
+                  {aiAnalysis.length === 0 ? (
+                    <div className="text-xs text-slate-600 text-center py-4">No activity yet</div>
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {aiAnalysis.map((analysis, index) => (
+                        <div
+                          key={index}
+                          className="p-3 rounded text-xs"
+                          style={{
+                            backgroundColor: `${analysis.color}20`,
+                            borderLeft: `3px solid ${analysis.color}`
+                          }}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="font-semibold text-white text-xs">{analysis.type}</div>
+                            <div className="text-slate-500 text-xs">{analysis.timestamp}</div>
+                          </div>
+                          <div className="text-slate-300">{analysis.message}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="col-span-2 space-y-4">
+                <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
+                  <div className="bg-slate-900 px-4 py-2 border-b border-slate-700 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-blue-400">
+                      🗺️ GOOGLE MAPS - {viewMode.toUpperCase()}
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-500">Resources: {resources.length}</span>
+                      <button
+                        onClick={clearAllResources}
+                        className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition font-semibold"
+                      >
+                        🗑️ CLEAR
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {viewMode === 'map' ? (
+                    <div ref={mapContainerRef} className="google-map-container"></div>
+                  ) : (
+                    <div className="relative bg-slate-900" style={{ height: '600px' }}>
+                      {uploadedImage ? (
+                        <img src={uploadedImage} alt="Base layer" className="absolute inset-0 w-full h-full object-contain opacity-70" />
+                      ) : (
+                        <div className="absolute inset-0 flex items-center justify-center text-slate-600">
+                          <div className="text-center">
+                            <div className="text-6xl mb-4">📤</div>
+                            <div className="text-sm">Upload floor plan or aerial image</div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="bg-slate-900 px-4 py-2 border-t border-slate-700">
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-4 flex-wrap">
+                        {resourceTypes.map(type => {
+                          const count = resources.filter(r => r.type === type.id).length;
+                          return (
+                            <div key={type.id} className="flex items-center gap-1">
+                              <span className="text-lg">{type.icon}</span>
+                              <span className="text-slate-400">{type.name}:</span>
+                              <span className="font-semibold" style={{ color: type.color }}>{count}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="text-slate-500">
+                        Google Maps • Global Coverage
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-4 flex items-center gap-2">
+                    <span>📋</span> INCIDENT INFORMATION
+                  </h3>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Incident Number</label>
+                      <input
+                        type="text"
+                        value={incidentData.incidentNumber}
+                        onChange={(e) => setIncidentData({ ...incidentData, incidentNumber: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                        placeholder="INC-2025-XXXX"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Type</label>
+                      <select
+                        value={incidentData.type}
+                        onChange={(e) => setIncidentData({ ...incidentData, type: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="">Select</option>
+                        <option value="armed-robbery">Armed Robbery</option>
+                        <option value="hostage">Hostage</option>
+                        <option value="assault">Assault</option>
+                        <option value="burglary">Burglary</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Priority</label>
+                      <select
+                        value={incidentData.priority}
+                        onChange={(e) => setIncidentData({ ...incidentData, priority: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Status</label>
+                      <select
+                        value={incidentData.status}
+                        onChange={(e) => setIncidentData({ ...incidentData, status: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="active">Active</option>
+                        <option value="responding">Responding</option>
+                        <option value="on-scene">On Scene</option>
+                        <option value="resolved">Resolved</option>
+                      </select>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-xs text-slate-400 mb-1">Location</label>
+                      <input
+                        type="text"
+                        value={incidentData.location}
+                        onChange={(e) => setIncidentData({ ...incidentData, location: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                        placeholder="Address"
+                      />
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-xs text-slate-400 mb-1">Description</label>
+                      <textarea
+                        value={incidentData.description}
+                        onChange={(e) => setIncidentData({ ...incidentData, description: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                        rows="3"
+                        placeholder="Incident details..."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex gap-2">
+                    <button className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition font-semibold">
+                      💾 SAVE
+                    </button>
+                    <button className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 rounded transition font-semibold">
+                      📄 EXPORT
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-700 flex items-center justify-between text-xs text-slate-500">
+              <div>System v5.0 | Google Maps Integration | Voice + Manual Commands | User: COMMAND-01</div>
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                <span>Operational</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<PoliceIncidentManagement />);
+  </script>
+</body>
+</html>
