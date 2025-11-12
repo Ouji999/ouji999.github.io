@@ -1,0 +1,1856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Police Command Center - Natural Language AI</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Google Maps API - Replace YOUR_API_KEY with your actual Google Maps API key -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAEX9mKFybCJE8WPgHRldJEsgk9szTTFig&libraries=places,geometry"></script>
+  
+  <style>
+    .google-map-container {
+      width: 100%;
+      height: 600px;
+    }
+    .resource-marker {
+      transition: all 0.2s;
+      cursor: move !important;
+    }
+    .resource-marker:active {
+      cursor: grabbing !important;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .animate-spin {
+      animation: spin 1s linear infinite;
+    }
+    @keyframes pulse-wave {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.05); }
+    }
+    .speech-active {
+      animation: pulse-wave 1.5s ease-in-out infinite;
+    }
+    .transcript-word {
+      display: inline-block;
+      animation: fadeIn 0.3s ease-in;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .search-result-item {
+      transition: all 0.2s;
+    }
+    .search-result-item:hover {
+      background-color: rgba(59, 130, 246, 0.2);
+      transform: translateX(4px);
+    }
+    .api-key-warning {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      border: 2px solid #fca5a5;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse-circle {
+      0% {
+        transform: scale(1);
+        opacity: 0.6;
+      }
+      50% {
+        transform: scale(1.1);
+        opacity: 0.3;
+      }
+      100% {
+        transform: scale(1);
+        opacity: 0.6;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const PoliceIncidentManagement = () => {
+      const [viewMode, setViewMode] = useState('map');
+      const [uploadedImage, setUploadedImage] = useState(null);
+      const [drawingMode, setDrawingMode] = useState(null);
+      const [resources, setResources] = useState([]);
+      const [isListening, setIsListening] = useState(false);
+      const [voiceCommand, setVoiceCommand] = useState('');
+      const [interimTranscript, setInterimTranscript] = useState('');
+      const [manualCommand, setManualCommand] = useState('');
+      const [voiceSupported, setVoiceSupported] = useState(false);
+      const [voiceError, setVoiceError] = useState('');
+      const [aiAnalysis, setAiAnalysis] = useState([]);
+      const [selectedResource, setSelectedResource] = useState(null);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [searchResults, setSearchResults] = useState([]);
+      const [showSearchResults, setShowSearchResults] = useState(false);
+      const [isSearching, setIsSearching] = useState(false);
+      const [currentLocation, setCurrentLocation] = useState('Singapore');
+      const [mapStyle, setMapStyle] = useState('roadmap');
+      const [commandHistory, setCommandHistory] = useState([]);
+      const [googleMapsReady, setGoogleMapsReady] = useState(false);
+      const [showApiKeyWarning, setShowApiKeyWarning] = useState(false);
+      
+      // NEW: Multiple incidents tracking with color-coding
+      const [incidents, setIncidents] = useState([]);
+      const incidentCirclesRef = useRef([]);
+      const incidentMarkersRef = useRef([]);
+      
+      // NEW: Distance measurement tracking
+      const [distanceMeasurements, setDistanceMeasurements] = useState([]);
+      const distancePolylinesRef = useRef([]);
+      const distanceMarkersRef = useRef([]);
+      
+      const [incidentData, setIncidentData] = useState({
+        incidentNumber: '',
+        type: '',
+        priority: 'urgent',
+        status: 'active',
+        location: '',
+        reportedTime: new Date().toISOString().slice(0, 16),
+        description: '',
+        commander: '',
+        unitsAssigned: '',
+        casualties: '',
+        suspects: '',
+        witnesses: '',
+        evidence: '',
+        notes: ''
+      });
+
+      const googleMapRef = useRef(null);
+      const mapContainerRef = useRef(null);
+      const recognitionRef = useRef(null);
+      const resourceMarkersRef = useRef({});
+      const searchTimeoutRef = useRef(null);
+      const searchMarkerRef = useRef(null);
+      const geocoderRef = useRef(null);
+      const placesServiceRef = useRef(null);
+      const manualCommandInputRef = useRef(null);
+
+      // Singapore geographical bounds - restrict all searches to Singapore only
+      const singaporeBounds = {
+        north: 1.47,
+        south: 1.15,
+        east: 104.0,
+        west: 103.6
+      };
+
+      // NEW: Incident color palette for multiple incidents
+      const incidentColors = [
+        '#ef4444', // red
+        '#f59e0b', // amber
+        '#8b5cf6', // purple
+        '#ec4899', // pink
+        '#06b6d4', // cyan
+        '#f97316', // orange
+        '#14b8a6', // teal
+        '#a855f7', // violet
+      ];
+
+      const resourceTypes = [
+        { id: 'officer', name: 'Officer', icon: '👮', color: '#3b82f6' },
+        { id: 'unit', name: 'Police Unit', icon: '🚔', color: '#60a5fa' },
+        { id: 'vehicle', name: 'Vehicle', icon: '🚗', color: '#93c5fd' },
+        { id: 'suspect', name: 'Suspect', icon: '⚠️', color: '#ef4444' },
+        { id: 'witness', name: 'Witness', icon: '👥', color: '#10b981' },
+        { id: 'evidence', name: 'Evidence', icon: '📷', color: '#f59e0b' },
+        { id: 'command', name: 'Command Post', icon: '📡', color: '#8b5cf6' }
+      ];
+
+      // Initialize Google Maps
+      useEffect(() => {
+        if (!mapContainerRef.current || googleMapRef.current) return;
+
+        // Check if Google Maps API is loaded
+        if (typeof google === 'undefined' || !google.maps) {
+          console.error('Google Maps API not loaded');
+          setShowApiKeyWarning(true);
+          addAnalysis('Map Error', 'Google Maps API key not configured. Please add your API key.', '#ef4444');
+          return;
+        }
+
+        try {
+          console.log('Initializing Google Maps...');
+          
+          // Create map centered on Singapore
+          const map = new google.maps.Map(mapContainerRef.current, {
+            center: { lat: 1.3521, lng: 103.8198 },
+            zoom: 12,
+            mapTypeId: google.maps.MapTypeId.ROADMAP,
+            mapTypeControl: true,
+            mapTypeControlOptions: {
+              style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+              position: google.maps.ControlPosition.TOP_RIGHT
+            },
+            zoomControl: true,
+            streetViewControl: true,
+            fullscreenControl: true,
+            restriction: {
+              latLngBounds: singaporeBounds,
+              strictBounds: true
+            }
+          });
+
+          googleMapRef.current = map;
+          geocoderRef.current = new google.maps.Geocoder();
+          placesServiceRef.current = new google.maps.places.PlacesService(map);
+          setGoogleMapsReady(true);
+          
+          addAnalysis('System Ready', 'Google Maps initialized successfully. Singapore bounds enforced.', '#10b981');
+          console.log('Google Maps initialized successfully');
+        } catch (error) {
+          console.error('Error initializing Google Maps:', error);
+          addAnalysis('Map Error', `Failed to initialize map: ${error.message}`, '#ef4444');
+        }
+      }, []);
+
+      // Check if coordinates are within Singapore bounds
+      const isWithinSingapore = (lat, lng) => {
+        return lat >= singaporeBounds.south && 
+               lat <= singaporeBounds.north && 
+               lng >= singaporeBounds.west && 
+               lng <= singaporeBounds.east;
+      };
+
+      // Initialize voice recognition
+      useEffect(() => {
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          const recognition = new SpeechRecognition();
+          
+          recognition.continuous = false;
+          recognition.interimResults = true;
+          recognition.lang = 'en-US';
+          
+          recognition.onstart = () => {
+            setIsListening(true);
+            setVoiceError('');
+            addAnalysis('Voice Active', 'Listening for command...', '#3b82f6');
+          };
+          
+          recognition.onresult = (event) => {
+            let interim = '';
+            let final = '';
+            
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              const transcript = event.results[i][0].transcript;
+              if (event.results[i].isFinal) {
+                final += transcript;
+              } else {
+                interim += transcript;
+              }
+            }
+            
+            setInterimTranscript(interim);
+            
+            if (final) {
+              setVoiceCommand(final);
+              processCommand(final);
+            }
+          };
+          
+          recognition.onerror = (event) => {
+            setIsListening(false);
+            setVoiceError(`Voice recognition error: ${event.error}`);
+            addAnalysis('Voice Error', `Recognition failed: ${event.error}`, '#ef4444');
+          };
+          
+          recognition.onend = () => {
+            setIsListening(false);
+            setInterimTranscript('');
+          };
+          
+          recognitionRef.current = recognition;
+          setVoiceSupported(true);
+        } else {
+          setVoiceSupported(false);
+          setVoiceError('Voice recognition not supported in this browser. Use Chrome or Edge.');
+        }
+      }, []);
+
+      // Add to AI analysis log
+      const addAnalysis = (title, message, color = '#3b82f6') => {
+        const newAnalysis = {
+          id: Date.now(),
+          title,
+          message,
+          color,
+          timestamp: new Date().toLocaleTimeString()
+        };
+        setAiAnalysis(prev => [newAnalysis, ...prev].slice(0, 50));
+      };
+
+      // Add to command history
+      const addToHistory = (command, result) => {
+        const newEntry = {
+          id: Date.now(),
+          command,
+          result,
+          timestamp: new Date().toLocaleTimeString()
+        };
+        setCommandHistory(prev => [newEntry, ...prev].slice(0, 20));
+      };
+
+      // NEW: Create incident on map with unique color
+      const createIncident = async (location) => {
+        if (!googleMapRef.current || !geocoderRef.current) {
+          addAnalysis('Error', 'Map not initialized', '#ef4444');
+          return;
+        }
+
+        try {
+          const results = await new Promise((resolve, reject) => {
+            geocoderRef.current.geocode(
+              { 
+                address: location,
+                bounds: singaporeBounds,
+                region: 'SG'
+              },
+              (results, status) => {
+                if (status === 'OK') resolve(results);
+                else reject(status);
+              }
+            );
+          });
+
+          if (!results || results.length === 0) {
+            addAnalysis('Location Error', `Location "${location}" not found in Singapore`, '#ef4444');
+            addToHistory(`incident at ${location}`, 'Location not found in Singapore');
+            return;
+          }
+
+          const result = results[0];
+          const lat = result.geometry.location.lat();
+          const lng = result.geometry.location.lng();
+
+          if (!isWithinSingapore(lat, lng)) {
+            addAnalysis('Location Error', `"${location}" is outside Singapore boundaries`, '#ef4444');
+            addToHistory(`incident at ${location}`, 'Location outside Singapore');
+            return;
+          }
+
+          const incidentId = incidents.length + 1;
+          const color = incidentColors[incidents.length % incidentColors.length];
+
+          // Create incident circle
+          const circle = new google.maps.Circle({
+            map: googleMapRef.current,
+            center: { lat, lng },
+            radius: 300,
+            fillColor: color,
+            fillOpacity: 0.25,
+            strokeColor: color,
+            strokeOpacity: 0.8,
+            strokeWeight: 2
+          });
+
+          // Create incident marker
+          const marker = new google.maps.Marker({
+            map: googleMapRef.current,
+            position: { lat, lng },
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 12,
+              fillColor: color,
+              fillOpacity: 1,
+              strokeColor: '#ffffff',
+              strokeWeight: 2
+            },
+            label: {
+              text: incidentId.toString(),
+              color: '#ffffff',
+              fontSize: '12px',
+              fontWeight: 'bold'
+            },
+            title: `Incident ${incidentId}: ${location}`
+          });
+
+          const newIncident = {
+            id: incidentId,
+            location: result.formatted_address,
+            lat,
+            lng,
+            timestamp: new Date().toISOString(),
+            color
+          };
+
+          setIncidents(prev => [...prev, newIncident]);
+          incidentCirclesRef.current.push(circle);
+          incidentMarkersRef.current.push(marker);
+
+          googleMapRef.current.panTo({ lat, lng });
+          googleMapRef.current.setZoom(15);
+
+          addAnalysis(
+            `Incident ${incidentId} Created`,
+            `Location: ${result.formatted_address}`,
+            color
+          );
+          addToHistory(`incident at ${location}`, `Incident ${incidentId} marked on map`);
+
+          setIncidentData(prev => ({
+            ...prev,
+            location: result.formatted_address
+          }));
+
+        } catch (error) {
+          addAnalysis('Incident Error', `Failed to create incident: ${error}`, '#ef4444');
+          addToHistory(`incident at ${location}`, 'Failed to create incident');
+        }
+      };
+
+      // NEW: Clear specific incident
+      const clearIncident = (incidentId) => {
+        const incidentIndex = incidents.findIndex(inc => inc.id === incidentId);
+        
+        if (incidentIndex === -1) {
+          addAnalysis('Error', `Incident ${incidentId} not found`, '#ef4444');
+          addToHistory(`clear incident ${incidentId}`, 'Incident not found');
+          return;
+        }
+
+        // Remove map elements
+        if (incidentCirclesRef.current[incidentIndex]) {
+          incidentCirclesRef.current[incidentIndex].setMap(null);
+        }
+        if (incidentMarkersRef.current[incidentIndex]) {
+          incidentMarkersRef.current[incidentIndex].setMap(null);
+        }
+
+        // Remove from arrays
+        incidentCirclesRef.current.splice(incidentIndex, 1);
+        incidentMarkersRef.current.splice(incidentIndex, 1);
+        
+        const clearedIncident = incidents[incidentIndex];
+        setIncidents(prev => prev.filter(inc => inc.id !== incidentId));
+
+        addAnalysis(
+          `Incident ${incidentId} Cleared`,
+          `Location: ${clearedIncident.location}`,
+          '#10b981'
+        );
+        addToHistory(`clear incident ${incidentId}`, 'Incident cleared successfully');
+      };
+
+      // NEW: Clear all incidents
+      const clearAllIncidents = () => {
+        if (incidents.length === 0) {
+          addAnalysis('Info', 'No active incidents to clear', '#3b82f6');
+          return;
+        }
+
+        const count = incidents.length;
+
+        // Remove all circles
+        incidentCirclesRef.current.forEach(circle => {
+          if (circle) circle.setMap(null);
+        });
+
+        // Remove all markers
+        incidentMarkersRef.current.forEach(marker => {
+          if (marker) marker.setMap(null);
+        });
+
+        incidentCirclesRef.current = [];
+        incidentMarkersRef.current = [];
+        setIncidents([]);
+
+        addAnalysis('All Incidents Cleared', `${count} incident(s) removed from map`, '#10b981');
+        addToHistory('clear all incidents', `${count} incident(s) cleared`);
+      };
+
+      // NEW: Measure distance between two locations
+      const measureDistance = async (fromLocation, toLocation) => {
+        if (!googleMapRef.current || !geocoderRef.current) {
+          addAnalysis('Error', 'Map not initialized', '#ef4444');
+          return;
+        }
+
+        try {
+          addAnalysis('Measuring', `Calculating distance from ${fromLocation} to ${toLocation}...`, '#3b82f6');
+
+          // Geocode both locations
+          const fromResults = await new Promise((resolve, reject) => {
+            geocoderRef.current.geocode(
+              { address: fromLocation, bounds: singaporeBounds, region: 'SG' },
+              (results, status) => {
+                if (status === 'OK') resolve(results);
+                else reject(status);
+              }
+            );
+          });
+
+          const toResults = await new Promise((resolve, reject) => {
+            geocoderRef.current.geocode(
+              { address: toLocation, bounds: singaporeBounds, region: 'SG' },
+              (results, status) => {
+                if (status === 'OK') resolve(results);
+                else reject(status);
+              }
+            );
+          });
+
+          if (!fromResults || !toResults || fromResults.length === 0 || toResults.length === 0) {
+            addAnalysis('Error', 'One or both locations not found in Singapore', '#ef4444');
+            return;
+          }
+
+          const fromPos = fromResults[0].geometry.location;
+          const toPos = toResults[0].geometry.location;
+
+          // Check Singapore bounds
+          if (!isWithinSingapore(fromPos.lat(), fromPos.lng()) || 
+              !isWithinSingapore(toPos.lat(), toPos.lng())) {
+            addAnalysis('Error', 'One or both locations are outside Singapore', '#ef4444');
+            return;
+          }
+
+          // Calculate distance using Google Maps Geometry library
+          const distanceInMeters = google.maps.geometry.spherical.computeDistanceBetween(fromPos, toPos);
+          const distanceInKm = (distanceInMeters / 1000).toFixed(2);
+
+          // Create polyline
+          const polyline = new google.maps.Polyline({
+            path: [fromPos, toPos],
+            geodesic: true,
+            strokeColor: '#facc15',
+            strokeOpacity: 1.0,
+            strokeWeight: 3,
+            map: googleMapRef.current
+          });
+
+          // Create markers at both ends
+          const fromMarker = new google.maps.Marker({
+            position: fromPos,
+            map: googleMapRef.current,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 8,
+              fillColor: '#facc15',
+              fillOpacity: 1,
+              strokeColor: '#ffffff',
+              strokeWeight: 2
+            },
+            label: {
+              text: 'A',
+              color: '#000000',
+              fontSize: '12px',
+              fontWeight: 'bold'
+            },
+            title: fromResults[0].formatted_address
+          });
+
+          const toMarker = new google.maps.Marker({
+            position: toPos,
+            map: googleMapRef.current,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 8,
+              fillColor: '#facc15',
+              fillOpacity: 1,
+              strokeColor: '#ffffff',
+              strokeWeight: 2
+            },
+            label: {
+              text: 'B',
+              color: '#000000',
+              fontSize: '12px',
+              fontWeight: 'bold'
+            },
+            title: toResults[0].formatted_address
+          });
+
+          // Create info window with distance
+          const midpoint = new google.maps.LatLng(
+            (fromPos.lat() + toPos.lat()) / 2,
+            (fromPos.lng() + toPos.lng()) / 2
+          );
+
+          const infoWindow = new google.maps.InfoWindow({
+            position: midpoint,
+            content: `
+              <div style="padding: 8px; font-family: sans-serif;">
+                <div style="font-weight: bold; font-size: 16px; color: #facc15; margin-bottom: 4px;">
+                  📏 ${distanceInKm} km
+                </div>
+                <div style="font-size: 12px; color: #666;">
+                  <div><strong>From:</strong> ${fromResults[0].formatted_address}</div>
+                  <div><strong>To:</strong> ${toResults[0].formatted_address}</div>
+                </div>
+              </div>
+            `
+          });
+          infoWindow.open(googleMapRef.current);
+
+          // Store measurement
+          const measurement = {
+            id: Date.now(),
+            from: fromResults[0].formatted_address,
+            to: toResults[0].formatted_address,
+            distance: distanceInKm,
+            polyline,
+            markers: [fromMarker, toMarker],
+            infoWindow
+          };
+
+          distancePolylinesRef.current.push(polyline);
+          distanceMarkersRef.current.push(fromMarker, toMarker);
+          setDistanceMeasurements(prev => [...prev, measurement]);
+
+          // Fit bounds to show both locations
+          const bounds = new google.maps.LatLngBounds();
+          bounds.extend(fromPos);
+          bounds.extend(toPos);
+          googleMapRef.current.fitBounds(bounds);
+
+          addAnalysis(
+            'Distance Measured',
+            `${distanceInKm} km from ${fromLocation} to ${toLocation}`,
+            '#facc15'
+          );
+          addToHistory(
+            `measure distance from ${fromLocation} to ${toLocation}`,
+            `${distanceInKm} km`
+          );
+
+        } catch (error) {
+          addAnalysis('Distance Error', `Failed to measure distance: ${error}`, '#ef4444');
+          addToHistory(`measure distance`, 'Failed to calculate distance');
+        }
+      };
+
+      // NEW: Clear all distance measurements
+      const clearDistanceMeasurements = () => {
+        distancePolylinesRef.current.forEach(polyline => {
+          if (polyline) polyline.setMap(null);
+        });
+
+        distanceMarkersRef.current.forEach(marker => {
+          if (marker) marker.setMap(null);
+        });
+
+        distanceMeasurements.forEach(m => {
+          if (m.infoWindow) m.infoWindow.close();
+        });
+
+        distancePolylinesRef.current = [];
+        distanceMarkersRef.current = [];
+        setDistanceMeasurements([]);
+
+        addAnalysis('Distances Cleared', 'All distance measurements removed', '#10b981');
+      };
+
+      // Process natural language commands
+      const processCommand = async (command) => {
+        if (!command || !command.trim()) return;
+        
+        const normalizedCommand = command.toLowerCase().trim();
+        console.log('Processing command:', normalizedCommand);
+        
+        // NEW: Distance measurement commands
+        const distanceMatch = normalizedCommand.match(/measure\s+distance\s+(?:from\s+)?(.+?)\s+to\s+(.+)/i);
+        if (distanceMatch) {
+          const fromLocation = distanceMatch[1].trim();
+          const toLocation = distanceMatch[2].trim();
+          await measureDistance(fromLocation, toLocation);
+          return;
+        }
+
+        // NEW: Clear distance measurements
+        if (normalizedCommand.includes('clear distance') || normalizedCommand.includes('remove distance')) {
+          clearDistanceMeasurements();
+          return;
+        }
+
+        // NEW: Clear specific incident
+        const clearIncidentMatch = normalizedCommand.match(/clear\s+incident\s+(\d+)/i);
+        if (clearIncidentMatch) {
+          const incidentId = parseInt(clearIncidentMatch[1]);
+          clearIncident(incidentId);
+          return;
+        }
+
+        // NEW: Clear all incidents
+        if (normalizedCommand.includes('clear all incidents') || 
+            normalizedCommand.includes('remove all incidents')) {
+          clearAllIncidents();
+          return;
+        }
+
+        // Incident creation
+        if (normalizedCommand.includes('incident at') || 
+            normalizedCommand.includes('emergency at') || 
+            normalizedCommand.includes('alert at')) {
+          const match = normalizedCommand.match(/(?:incident|emergency|alert)\s+at\s+(.+)/i);
+          if (match) {
+            const location = match[1].trim();
+            await createIncident(location);
+            return;
+          }
+        }
+
+        // Map navigation commands
+        if (normalizedCommand.includes('go to') || 
+            normalizedCommand.includes('navigate to') || 
+            normalizedCommand.includes('fly to') ||
+            normalizedCommand.includes('show me')) {
+          const match = normalizedCommand.match(/(?:go to|navigate to|fly to|show me)\s+(.+)/i);
+          if (match) {
+            const location = match[1].trim();
+            await navigateToLocation(location);
+            return;
+          }
+        }
+
+        // Zoom commands
+        if (normalizedCommand.includes('zoom')) {
+          if (normalizedCommand.includes('zoom in')) {
+            zoomIn();
+            return;
+          }
+          if (normalizedCommand.includes('zoom out')) {
+            zoomOut();
+            return;
+          }
+          
+          const zoomToMatch = normalizedCommand.match(/zoom\s+(?:to|at)\s+(?:level\s+)?(\d+)/i);
+          if (zoomToMatch) {
+            const level = parseInt(zoomToMatch[1]);
+            zoomToLevel(level);
+            return;
+          }
+          
+          const zoomIntoMatch = normalizedCommand.match(/zoom\s+into\s+(.+)/i);
+          if (zoomIntoMatch) {
+            const location = zoomIntoMatch[1].trim();
+            await zoomIntoLocation(location);
+            return;
+          }
+        }
+
+        // Resource deployment
+        if (normalizedCommand.includes('deploy') || 
+            normalizedCommand.includes('place') || 
+            normalizedCommand.includes('add')) {
+          
+          const patterns = [
+            /(?:deploy|place|add)\s+(officer|unit|vehicle|suspect|witness|evidence|command)\s+(?:at|to|in)\s+(.+)/i,
+            /(?:deploy|place|add)\s+(officer|unit|vehicle|suspect|witness|evidence|command)/i
+          ];
+          
+          for (const pattern of patterns) {
+            const match = normalizedCommand.match(pattern);
+            if (match) {
+              const resourceType = match[1].toLowerCase();
+              const location = match[2] ? match[2].trim() : null;
+              
+              if (location) {
+                await deployResourceAt(resourceType, location);
+              } else {
+                setSelectedResource(resourceType);
+                addAnalysis('Click Mode', `Click on map to place ${resourceType}`, '#f59e0b');
+                addToHistory(command, `Click mode activated for ${resourceType}`);
+              }
+              return;
+            }
+          }
+        }
+
+        // Map controls
+        if (normalizedCommand.includes('show traffic') || normalizedCommand.includes('traffic on')) {
+          toggleTraffic(true);
+          return;
+        }
+        if (normalizedCommand.includes('hide traffic') || normalizedCommand.includes('traffic off')) {
+          toggleTraffic(false);
+          return;
+        }
+        if (normalizedCommand.includes('satellite') || normalizedCommand.includes('aerial')) {
+          changeMapType('satellite');
+          return;
+        }
+        if (normalizedCommand.includes('roadmap') || normalizedCommand.includes('road map')) {
+          changeMapType('roadmap');
+          return;
+        }
+        if (normalizedCommand.includes('hybrid')) {
+          changeMapType('hybrid');
+          return;
+        }
+        if (normalizedCommand.includes('terrain')) {
+          changeMapType('terrain');
+          return;
+        }
+
+        // Clear commands
+        if (normalizedCommand.includes('clear') || normalizedCommand.includes('remove')) {
+          if (normalizedCommand.includes('all') || normalizedCommand.includes('everything')) {
+            clearAllResources();
+            return;
+          }
+          
+          const resourceMatch = normalizedCommand.match(/(?:clear|remove)\s+(officer|unit|vehicle|suspect|witness|evidence|command)/i);
+          if (resourceMatch) {
+            const type = resourceMatch[1].toLowerCase();
+            clearResourcesByType(type);
+            return;
+          }
+        }
+
+        // Help command
+        if (normalizedCommand.includes('help') || normalizedCommand.includes('what can you do')) {
+          showHelp();
+          return;
+        }
+
+        // If no match found
+        addAnalysis('Unknown Command', `Could not understand: "${command}"`, '#ef4444');
+        addToHistory(command, 'Command not recognized');
+      };
+
+      // Navigate to location with smooth pan
+      const navigateToLocation = async (location) => {
+        if (!googleMapRef.current || !geocoderRef.current) {
+          addAnalysis('Error', 'Map not initialized', '#ef4444');
+          return;
+        }
+
+        try {
+          const results = await new Promise((resolve, reject) => {
+            geocoderRef.current.geocode(
+              { 
+                address: location,
+                bounds: singaporeBounds,
+                region: 'SG'
+              },
+              (results, status) => {
+                if (status === 'OK') resolve(results);
+                else reject(status);
+              }
+            );
+          });
+
+          if (!results || results.length === 0) {
+            addAnalysis('Location Error', `"${location}" not found in Singapore`, '#ef4444');
+            addToHistory(`go to ${location}`, 'Location not found');
+            return;
+          }
+
+          const result = results[0];
+          const lat = result.geometry.location.lat();
+          const lng = result.geometry.location.lng();
+
+          if (!isWithinSingapore(lat, lng)) {
+            addAnalysis('Location Error', `"${location}" is outside Singapore boundaries`, '#ef4444');
+            addToHistory(`go to ${location}`, 'Location outside Singapore');
+            return;
+          }
+
+          googleMapRef.current.panTo({ lat, lng });
+          googleMapRef.current.setZoom(15);
+          setCurrentLocation(result.formatted_address);
+          
+          addAnalysis('Navigation', `Navigating to ${result.formatted_address}`, '#10b981');
+          addToHistory(`go to ${location}`, result.formatted_address);
+        } catch (error) {
+          addAnalysis('Navigation Error', `Could not navigate to ${location}`, '#ef4444');
+          addToHistory(`go to ${location}`, 'Navigation failed');
+        }
+      };
+
+      // Zoom into specific location
+      const zoomIntoLocation = async (location) => {
+        if (!googleMapRef.current || !geocoderRef.current) {
+          addAnalysis('Error', 'Map not initialized', '#ef4444');
+          return;
+        }
+
+        try {
+          const results = await new Promise((resolve, reject) => {
+            geocoderRef.current.geocode(
+              { 
+                address: location,
+                bounds: singaporeBounds,
+                region: 'SG'
+              },
+              (results, status) => {
+                if (status === 'OK') resolve(results);
+                else reject(status);
+              }
+            );
+          });
+
+          if (!results || results.length === 0) {
+            addAnalysis('Location Error', `"${location}" not found in Singapore`, '#ef4444');
+            return;
+          }
+
+          const result = results[0];
+          const lat = result.geometry.location.lat();
+          const lng = result.geometry.location.lng();
+
+          if (!isWithinSingapore(lat, lng)) {
+            addAnalysis('Location Error', `"${location}" is outside Singapore`, '#ef4444');
+            return;
+          }
+
+          googleMapRef.current.panTo({ lat, lng });
+          googleMapRef.current.setZoom(17);
+          
+          addAnalysis('Zoom', `Zoomed into ${result.formatted_address}`, '#10b981');
+          addToHistory(`zoom into ${location}`, `Zoomed to level 17`);
+        } catch (error) {
+          addAnalysis('Zoom Error', `Could not zoom into ${location}`, '#ef4444');
+        }
+      };
+
+      const zoomIn = () => {
+        if (!googleMapRef.current) return;
+        const currentZoom = googleMapRef.current.getZoom();
+        googleMapRef.current.setZoom(currentZoom + 1);
+        addAnalysis('Zoom', `Zoomed in to level ${currentZoom + 1}`, '#10b981');
+        addToHistory('zoom in', `Level ${currentZoom + 1}`);
+      };
+
+      const zoomOut = () => {
+        if (!googleMapRef.current) return;
+        const currentZoom = googleMapRef.current.getZoom();
+        googleMapRef.current.setZoom(currentZoom - 1);
+        addAnalysis('Zoom', `Zoomed out to level ${currentZoom - 1}`, '#10b981');
+        addToHistory('zoom out', `Level ${currentZoom - 1}`);
+      };
+
+      const zoomToLevel = (level) => {
+        if (!googleMapRef.current) return;
+        if (level < 1 || level > 21) {
+          addAnalysis('Zoom Error', 'Zoom level must be between 1 and 21', '#ef4444');
+          return;
+        }
+        googleMapRef.current.setZoom(level);
+        addAnalysis('Zoom', `Set zoom to level ${level}`, '#10b981');
+        addToHistory(`zoom to level ${level}`, `Level ${level}`);
+      };
+
+      // Deploy resource at specific location
+      const deployResourceAt = async (resourceType, location) => {
+        if (!googleMapRef.current || !geocoderRef.current) {
+          addAnalysis('Error', 'Map not initialized', '#ef4444');
+          return;
+        }
+
+        try {
+          const results = await new Promise((resolve, reject) => {
+            geocoderRef.current.geocode(
+              { 
+                address: location,
+                bounds: singaporeBounds,
+                region: 'SG'
+              },
+              (results, status) => {
+                if (status === 'OK') resolve(results);
+                else reject(status);
+              }
+            );
+          });
+
+          if (!results || results.length === 0) {
+            addAnalysis('Location Error', `"${location}" not found in Singapore`, '#ef4444');
+            return;
+          }
+
+          const result = results[0];
+          const lat = result.geometry.location.lat();
+          const lng = result.geometry.location.lng();
+
+          if (!isWithinSingapore(lat, lng)) {
+            addAnalysis('Location Error', `"${location}" is outside Singapore`, '#ef4444');
+            return;
+          }
+
+          addResource(resourceType, lat, lng);
+          googleMapRef.current.panTo({ lat, lng });
+          
+          addAnalysis('Resource Deployed', `${resourceType} placed at ${result.formatted_address}`, '#10b981');
+          addToHistory(`deploy ${resourceType} at ${location}`, result.formatted_address);
+        } catch (error) {
+          addAnalysis('Deployment Error', `Could not deploy ${resourceType}`, '#ef4444');
+        }
+      };
+
+      // Add resource to map
+      const addResource = (type, lat, lng) => {
+        const resourceInfo = resourceTypes.find(r => r.id === type);
+        if (!resourceInfo) return;
+
+        const id = Date.now();
+        const marker = new google.maps.Marker({
+          position: { lat, lng },
+          map: googleMapRef.current,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 10,
+            fillColor: resourceInfo.color,
+            fillOpacity: 0.9,
+            strokeColor: '#ffffff',
+            strokeWeight: 2
+          },
+          label: {
+            text: resourceInfo.icon,
+            fontSize: '16px'
+          },
+          draggable: true,
+          title: resourceInfo.name
+        });
+
+        marker.addListener('dragend', (event) => {
+          const newLat = event.latLng.lat();
+          const newLng = event.latLng.lng();
+          
+          if (!isWithinSingapore(newLat, newLng)) {
+            addAnalysis('Boundary Error', 'Cannot move resource outside Singapore', '#ef4444');
+            marker.setPosition({ lat, lng });
+            return;
+          }
+          
+          updateResourcePosition(id, newLat, newLng);
+        });
+
+        resourceMarkersRef.current[id] = marker;
+
+        const newResource = {
+          id,
+          type,
+          position: { lat, lng },
+          timestamp: new Date().toISOString()
+        };
+
+        setResources(prev => [...prev, newResource]);
+      };
+
+      const updateResourcePosition = (id, lat, lng) => {
+        setResources(prev =>
+          prev.map(r => r.id === id ? { ...r, position: { lat, lng } } : r)
+        );
+      };
+
+      // Toggle traffic layer
+      const toggleTraffic = (show) => {
+        if (!googleMapRef.current) return;
+        
+        if (!window.trafficLayer) {
+          window.trafficLayer = new google.maps.TrafficLayer();
+        }
+        
+        if (show) {
+          window.trafficLayer.setMap(googleMapRef.current);
+          addAnalysis('Traffic', 'Traffic layer enabled', '#10b981');
+          addToHistory('show traffic', 'Traffic layer on');
+        } else {
+          window.trafficLayer.setMap(null);
+          addAnalysis('Traffic', 'Traffic layer disabled', '#10b981');
+          addToHistory('hide traffic', 'Traffic layer off');
+        }
+      };
+
+      // Change map type
+      const changeMapType = (type) => {
+        if (!googleMapRef.current) return;
+        
+        const typeMap = {
+          'roadmap': google.maps.MapTypeId.ROADMAP,
+          'satellite': google.maps.MapTypeId.SATELLITE,
+          'hybrid': google.maps.MapTypeId.HYBRID,
+          'terrain': google.maps.MapTypeId.TERRAIN
+        };
+        
+        if (typeMap[type]) {
+          googleMapRef.current.setMapTypeId(typeMap[type]);
+          setMapStyle(type);
+          addAnalysis('Map Type', `Changed to ${type} view`, '#10b981');
+          addToHistory(`${type} view`, `Map type changed`);
+        }
+      };
+
+      // Clear resources
+      const clearResourcesByType = (type) => {
+        const filtered = resources.filter(r => r.type === type);
+        filtered.forEach(r => {
+          if (resourceMarkersRef.current[r.id]) {
+            resourceMarkersRef.current[r.id].setMap(null);
+            delete resourceMarkersRef.current[r.id];
+          }
+        });
+        
+        setResources(prev => prev.filter(r => r.type !== type));
+        addAnalysis('Resources Cleared', `Removed all ${type} resources`, '#10b981');
+        addToHistory(`clear ${type}`, `${filtered.length} removed`);
+      };
+
+      const clearAllResources = () => {
+        Object.values(resourceMarkersRef.current).forEach(marker => {
+          marker.setMap(null);
+        });
+        
+        resourceMarkersRef.current = {};
+        setResources([]);
+        addAnalysis('All Cleared', 'All resources removed from map', '#10b981');
+        addToHistory('clear all', 'All resources cleared');
+      };
+
+      const showHelp = () => {
+        addAnalysis('Help', 'View Command Reference panel for all available commands', '#3b82f6');
+        addToHistory('help', 'Command reference displayed');
+      };
+
+      // Map click handler
+      useEffect(() => {
+        if (!googleMapRef.current) return;
+
+        const clickListener = googleMapRef.current.addListener('click', (event) => {
+          const lat = event.latLng.lat();
+          const lng = event.latLng.lng();
+
+          if (!isWithinSingapore(lat, lng)) {
+            addAnalysis('Boundary Error', 'Cannot place resources outside Singapore', '#ef4444');
+            return;
+          }
+
+          if (selectedResource) {
+            addResource(selectedResource, lat, lng);
+            setSelectedResource(null);
+          }
+        });
+
+        return () => {
+          google.maps.event.removeListener(clickListener);
+        };
+      }, [selectedResource]);
+
+      // Location search with debounce
+      useEffect(() => {
+        if (!searchQuery || !googleMapRef.current || !placesServiceRef.current) {
+          setShowSearchResults(false);
+          return;
+        }
+
+        if (searchTimeoutRef.current) {
+          clearTimeout(searchTimeoutRef.current);
+        }
+
+        searchTimeoutRef.current = setTimeout(() => {
+          setIsSearching(true);
+          
+          const request = {
+            query: searchQuery,
+            bounds: singaporeBounds,
+            locationBias: {
+              center: { lat: 1.3521, lng: 103.8198 },
+              radius: 50000
+            }
+          };
+
+          placesServiceRef.current.textSearch(request, (results, status) => {
+            setIsSearching(false);
+            
+            if (status === google.maps.places.PlacesServiceStatus.OK && results) {
+              const filteredResults = results
+                .filter(place => {
+                  const lat = place.geometry.location.lat();
+                  const lng = place.geometry.location.lng();
+                  return isWithinSingapore(lat, lng);
+                })
+                .slice(0, 5);
+              
+              setSearchResults(filteredResults);
+              setShowSearchResults(true);
+            } else {
+              setSearchResults([]);
+              setShowSearchResults(false);
+            }
+          });
+        }, 300);
+
+        return () => {
+          if (searchTimeoutRef.current) {
+            clearTimeout(searchTimeoutRef.current);
+          }
+        };
+      }, [searchQuery]);
+
+      const handleSearchResultClick = (place) => {
+        const lat = place.geometry.location.lat();
+        const lng = place.geometry.location.lng();
+        
+        googleMapRef.current.panTo({ lat, lng });
+        googleMapRef.current.setZoom(16);
+        
+        if (searchMarkerRef.current) {
+          searchMarkerRef.current.setMap(null);
+        }
+        
+        searchMarkerRef.current = new google.maps.Marker({
+          position: { lat, lng },
+          map: googleMapRef.current,
+          animation: google.maps.Animation.DROP,
+          title: place.name
+        });
+        
+        setSearchQuery('');
+        setShowSearchResults(false);
+        setCurrentLocation(place.formatted_address || place.name);
+        
+        addAnalysis('Location Search', `Found: ${place.name}`, '#10b981');
+      };
+
+      const quickLocations = [
+        { name: 'Marina Bay', query: 'Marina Bay Sands, Singapore' },
+        { name: 'Changi Airport', query: 'Singapore Changi Airport' },
+        { name: 'Orchard Road', query: 'Orchard Road, Singapore' },
+        { name: 'Sentosa', query: 'Sentosa Island, Singapore' }
+      ];
+
+      const handleQuickLocation = async (location) => {
+        await navigateToLocation(location);
+      };
+
+      const startListening = () => {
+        if (recognitionRef.current && voiceSupported) {
+          try {
+            recognitionRef.current.start();
+          } catch (error) {
+            console.error('Error starting recognition:', error);
+          }
+        }
+      };
+
+      const stopListening = () => {
+        if (recognitionRef.current && isListening) {
+          recognitionRef.current.stop();
+        }
+      };
+
+      const handleManualCommand = (e) => {
+        e.preventDefault();
+        if (manualCommand.trim()) {
+          processCommand(manualCommand);
+          setManualCommand('');
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
+          <div className="container mx-auto p-4">
+            {/* API Key Warning */}
+            {showApiKeyWarning && (
+              <div className="api-key-warning p-4 rounded-lg mb-4 text-center shadow-lg">
+                <div className="text-xl font-bold mb-2">⚠️ GOOGLE MAPS API KEY REQUIRED</div>
+                <div className="text-sm">
+                  Please replace YOUR_API_KEY in the HTML file with your actual Google Maps API key.
+                  <br />
+                  Get your key at: <a href="https://developers.google.com/maps/documentation/javascript/get-api-key" target="_blank" className="underline">Google Maps Platform</a>
+                </div>
+              </div>
+            )}
+
+            {/* Header */}
+            <div className="mb-6 bg-gradient-to-r from-blue-900 to-blue-800 rounded-lg p-4 border border-blue-700 shadow-xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="text-4xl">🚨</div>
+                  <div>
+                    <h1 className="text-2xl font-bold tracking-tight">POLICE COMMAND CENTER</h1>
+                    <p className="text-sm text-blue-200">Natural Language AI • Enhanced with Distance Measurement & Multi-Incident Tracking</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-blue-300">Singapore Operations Only</div>
+                  <div className="text-sm font-semibold">{currentLocation}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Main Grid Layout */}
+            <div className="grid grid-cols-3 gap-4">
+              {/* LEFT PANEL - 1 column */}
+              <div className="space-y-4">
+                {/* 1. Manual Command Input */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>⌨️</span> MANUAL COMMAND INPUT
+                  </h3>
+                  <form onSubmit={handleManualCommand}>
+                    <input
+                      ref={manualCommandInputRef}
+                      type="text"
+                      value={manualCommand}
+                      onChange={(e) => setManualCommand(e.target.value)}
+                      placeholder="Type command here..."
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500 mb-2"
+                    />
+                    <button
+                      type="submit"
+                      className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition font-semibold"
+                    >
+                      ▶ EXECUTE
+                    </button>
+                  </form>
+                </div>
+
+                {/* 2. Voice Commands */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🎤</span> VOICE COMMANDS
+                  </h3>
+                  {voiceSupported ? (
+                    <div>
+                      <button
+                        onClick={isListening ? stopListening : startListening}
+                        className={`w-full px-4 py-3 rounded font-semibold transition ${
+                          isListening
+                            ? 'bg-red-600 hover:bg-red-700 speech-active'
+                            : 'bg-green-600 hover:bg-green-700'
+                        }`}
+                      >
+                        {isListening ? '⏹️ STOP LISTENING' : '🎤 START LISTENING'}
+                      </button>
+                      
+                      {(voiceCommand || interimTranscript) && (
+                        <div className="mt-3 p-3 bg-slate-900 rounded text-sm border border-slate-600">
+                          <div className="text-xs text-slate-400 mb-1">
+                            {interimTranscript ? 'Listening...' : 'Last Command:'}
+                          </div>
+                          <div className="text-white">
+                            {interimTranscript || voiceCommand}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-red-400 p-3 bg-red-900/20 rounded border border-red-800">
+                      {voiceError}
+                    </div>
+                  )}
+                </div>
+
+                {/* 3. Command History */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>📜</span> COMMAND HISTORY
+                  </h3>
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {commandHistory.length === 0 ? (
+                      <div className="text-xs text-slate-500 text-center py-4">
+                        No commands executed yet
+                      </div>
+                    ) : (
+                      commandHistory.map(entry => (
+                        <div key={entry.id} className="text-xs bg-slate-900 p-2 rounded border border-slate-700">
+                          <div className="flex items-start justify-between mb-1">
+                            <div className="text-blue-400 font-semibold flex-1 break-words">
+                              {entry.command}
+                            </div>
+                            <div className="text-slate-500 text-[10px] ml-2 whitespace-nowrap">
+                              {entry.timestamp}
+                            </div>
+                          </div>
+                          <div className="text-slate-400 break-words">{entry.result}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* 4. Command Reference */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>📖</span> COMMAND REFERENCE
+                  </h3>
+                  <div className="space-y-2 text-xs max-h-80 overflow-y-auto">
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-green-400 font-semibold mb-1">✨ NEW: Distance Measurement</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"measure distance from Marina Bay to Changi Airport"</div>
+                        <div>"measure distance from [location A] to [location B]"</div>
+                        <div>"clear distance" / "remove distance"</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-green-400 font-semibold mb-1">✨ NEW: Multiple Incidents</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"incident at Orchard Road"</div>
+                        <div>"incident at Marina Bay"</div>
+                        <div>"clear incident 1"</div>
+                        <div>"clear incident 2"</div>
+                        <div>"clear all incidents"</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-blue-400 font-semibold mb-1">Navigation</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"go to Marina Bay"</div>
+                        <div>"navigate to Changi Airport"</div>
+                        <div>"fly to Sentosa"</div>
+                        <div>"show me Orchard Road"</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-blue-400 font-semibold mb-1">Zoom Controls</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"zoom in" / "zoom out"</div>
+                        <div>"zoom to level 15"</div>
+                        <div>"zoom into Marina Bay"</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-blue-400 font-semibold mb-1">Resource Deployment</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"deploy officer at Orchard Road"</div>
+                        <div>"place unit at Marina Bay"</div>
+                        <div>"add vehicle at Changi"</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-blue-400 font-semibold mb-1">Map Controls</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"show traffic" / "hide traffic"</div>
+                        <div>"satellite view"</div>
+                        <div>"roadmap view"</div>
+                        <div>"hybrid view"</div>
+                        <div>"terrain view"</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-2 rounded">
+                      <div className="text-blue-400 font-semibold mb-1">Clear Operations</div>
+                      <div className="text-slate-300 space-y-1">
+                        <div>"clear all"</div>
+                        <div>"clear officers"</div>
+                        <div>"remove vehicles"</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 5. Location Search */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🔍</span> LOCATION SEARCH
+                  </h3>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search Singapore locations..."
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                    />
+                    {isSearching && (
+                      <div className="absolute right-3 top-2">
+                        <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                      </div>
+                    )}
+                    
+                    {showSearchResults && searchResults.length > 0 && (
+                      <div className="absolute z-10 w-full mt-1 bg-slate-900 border border-slate-600 rounded shadow-lg max-h-60 overflow-y-auto">
+                        {searchResults.map((place, index) => (
+                          <div
+                            key={index}
+                            onClick={() => handleSearchResultClick(place)}
+                            className="search-result-item p-2 cursor-pointer border-b border-slate-700 last:border-b-0"
+                          >
+                            <div className="text-sm font-semibold">{place.name}</div>
+                            <div className="text-xs text-slate-400">
+                              {place.formatted_address}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {quickLocations.map(loc => (
+                      <button
+                        key={loc.name}
+                        onClick={() => handleQuickLocation(loc.query)}
+                        className="px-2 py-1 bg-slate-900 hover:bg-slate-700 rounded text-xs transition border border-slate-600"
+                      >
+                        {loc.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 6. Resource Tools */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🛠️</span> RESOURCE TOOLS
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    {resourceTypes.map(type => (
+                      <button
+                        key={type.id}
+                        onClick={() => setSelectedResource(type.id)}
+                        className={`px-3 py-2 rounded text-sm transition border-2 ${
+                          selectedResource === type.id
+                            ? 'bg-blue-600 border-blue-400'
+                            : 'bg-slate-900 border-slate-600 hover:border-slate-500'
+                        }`}
+                      >
+                        <div className="text-lg mb-1">{type.icon}</div>
+                        <div className="text-xs">{type.name}</div>
+                      </button>
+                    ))}
+                  </div>
+                  {selectedResource && (
+                    <div className="mt-3 text-xs text-center text-yellow-400 bg-yellow-900/20 py-2 rounded border border-yellow-800">
+                      Click on map to place {resourceTypes.find(r => r.id === selectedResource)?.name}
+                    </div>
+                  )}
+                </div>
+
+                {/* 7. View Mode */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>👁️</span> VIEW MODE
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <button
+                      onClick={() => setViewMode('map')}
+                      className={`px-3 py-2 rounded text-sm transition ${
+                        viewMode === 'map'
+                          ? 'bg-blue-600'
+                          : 'bg-slate-900 hover:bg-slate-700'
+                      }`}
+                    >
+                      🗺️ Map View
+                    </button>
+                    <button
+                      onClick={() => setViewMode('floor')}
+                      className={`px-3 py-2 rounded text-sm transition ${
+                        viewMode === 'floor'
+                          ? 'bg-blue-600'
+                          : 'bg-slate-900 hover:bg-slate-700'
+                      }`}
+                    >
+                      📐 Floor Plan
+                    </button>
+                  </div>
+
+                  {viewMode === 'map' && (
+                    <div className="space-y-2">
+                      <label className="block text-xs text-slate-400">Map Type:</label>
+                      <select
+                        value={mapStyle}
+                        onChange={(e) => changeMapType(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="roadmap">Roadmap</option>
+                        <option value="satellite">Satellite</option>
+                        <option value="hybrid">Hybrid</option>
+                        <option value="terrain">Terrain</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                {/* 8. System Log */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                    <span>🤖</span> SYSTEM LOG
+                  </h3>
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {aiAnalysis.length === 0 ? (
+                      <div className="text-xs text-slate-500 text-center py-4">
+                        No system activity yet
+                      </div>
+                    ) : (
+                      aiAnalysis.map(item => (
+                        <div key={item.id} className="text-xs bg-slate-900 p-2 rounded border border-slate-700">
+                          <div className="flex items-start justify-between mb-1">
+                            <div
+                              className="font-semibold flex-1"
+                              style={{ color: item.color }}
+                            >
+                              {item.title}
+                            </div>
+                            <div className="text-slate-500 text-[10px] ml-2 whitespace-nowrap">
+                              {item.timestamp}
+                            </div>
+                          </div>
+                          <div className="text-slate-300">{item.message}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* RIGHT PANEL - 2 columns */}
+              <div className="col-span-2 space-y-4">
+                {/* Google Maps */}
+                <div className="bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
+                  <div className="bg-slate-900 px-4 py-2 border-b border-slate-700 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-blue-400 flex items-center gap-2">
+                      <span>🗺️</span> GOOGLE MAPS - TACTICAL VIEW
+                    </h3>
+                    <div className="text-xs text-slate-400">Singapore Operations Zone</div>
+                  </div>
+
+                  {viewMode === 'map' ? (
+                    <div ref={mapContainerRef} className="google-map-container"></div>
+                  ) : (
+                    <div className="relative bg-slate-900" style={{ height: '600px' }}>
+                      {uploadedImage ? (
+                        <img src={uploadedImage} alt="Base layer" className="absolute inset-0 w-full h-full object-contain opacity-70" />
+                      ) : (
+                        <div className="absolute inset-0 flex items-center justify-center text-slate-600">
+                          <div className="text-center">
+                            <div className="text-6xl mb-4">📤</div>
+                            <div className="text-sm">Upload floor plan or aerial image</div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="bg-slate-900 px-4 py-2 border-t border-slate-700">
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-4 flex-wrap">
+                        {resourceTypes.map(type => {
+                          const count = resources.filter(r => r.type === type.id).length;
+                          return (
+                            <div key={type.id} className="flex items-center gap-1">
+                              <span className="text-lg">{type.icon}</span>
+                              <span className="text-slate-400">{type.name}:</span>
+                              <span className="font-semibold" style={{ color: type.color }}>{count}</span>
+                            </div>
+                          );
+                        })}
+                        {incidents.length > 0 && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-lg">🚨</span>
+                            <span className="text-slate-400">Active Incidents:</span>
+                            <span className="font-semibold text-red-500">{incidents.length}</span>
+                          </div>
+                        )}
+                        {distanceMeasurements.length > 0 && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-lg">📏</span>
+                            <span className="text-slate-400">Measurements:</span>
+                            <span className="font-semibold text-yellow-500">{distanceMeasurements.length}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-slate-500">
+                        Google Maps • Draggable Markers
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Incident Information */}
+                <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                  <h3 className="text-sm font-semibold text-blue-400 mb-4 flex items-center gap-2">
+                    <span>📋</span> INCIDENT INFORMATION
+                  </h3>
+
+                  {/* Active Incidents Alert */}
+                  {incidents.length > 0 && (
+                    <div className="mb-4 space-y-2">
+                      {incidents.map((incident, index) => (
+                        <div
+                          key={incident.id}
+                          className="bg-slate-900/50 border-2 rounded-lg p-3"
+                          style={{ borderColor: incident.color }}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="text-2xl">🚨</div>
+                            <div className="flex-1">
+                              <div className="text-sm font-bold mb-1" style={{ color: incident.color }}>
+                                INCIDENT #{incident.id} ACTIVE
+                              </div>
+                              <div className="text-xs text-white space-y-1">
+                                <div><span className="text-slate-400">Location:</span> {incident.location}</div>
+                                <div><span className="text-slate-400">Time:</span> {new Date(incident.timestamp).toLocaleTimeString()}</div>
+                                <div className="mt-2 pt-2 border-t border-slate-700">
+                                  <span className="text-slate-300">⚠️ Area highlighted on map with 300m radius</span>
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => clearIncident(incident.id)}
+                              className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      <button
+                        onClick={clearAllIncidents}
+                        className="w-full px-4 py-2 bg-red-600 hover:bg-red-700 rounded transition font-semibold text-sm"
+                      >
+                        🗑️ CLEAR ALL INCIDENTS
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Distance Measurements Display */}
+                  {distanceMeasurements.length > 0 && (
+                    <div className="mb-4">
+                      <div className="bg-yellow-900/20 border-2 border-yellow-500 rounded-lg p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-sm font-bold text-yellow-400">
+                            📏 DISTANCE MEASUREMENTS
+                          </div>
+                          <button
+                            onClick={clearDistanceMeasurements}
+                            className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 rounded text-xs transition"
+                          >
+                            Clear All
+                          </button>
+                        </div>
+                        <div className="space-y-2">
+                          {distanceMeasurements.map((measurement, index) => (
+                            <div key={measurement.id} className="text-xs text-white bg-slate-900/50 p-2 rounded">
+                              <div className="font-semibold text-yellow-400 mb-1">
+                                {measurement.distance} km
+                              </div>
+                              <div className="text-slate-300 space-y-1">
+                                <div><span className="text-slate-400">From:</span> {measurement.from}</div>
+                                <div><span className="text-slate-400">To:</span> {measurement.to}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Incident Number</label>
+                      <input
+                        type="text"
+                        value={incidentData.incidentNumber}
+                        onChange={(e) => setIncidentData({ ...incidentData, incidentNumber: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                        placeholder="P/YYYYMMDD/XXXX"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Type</label>
+                      <select
+                        value={incidentData.type}
+                        onChange={(e) => setIncidentData({ ...incidentData, type: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="">Select</option>
+                        <option value="armed-robbery">Armed Robbery</option>
+                        <option value="hostage">Hostage</option>
+                        <option value="assault">Assault</option>
+                        <option value="burglary">Burglary</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Priority</label>
+                      <select
+                        value={incidentData.priority}
+                        onChange={(e) => setIncidentData({ ...incidentData, priority: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="appointment">Appointment</option>
+                        <option value="non-response">Non-Response</option>
+                        <option value="non-urgent">Non-Urgent</option>
+                        <option value="urgent">Urgent</option>
+                        <option value="most-urgent">Most-Urgent</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Status</label>
+                      <select
+                        value={incidentData.status}
+                        onChange={(e) => setIncidentData({ ...incidentData, status: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="active">Active</option>
+                        <option value="responding">Responding</option>
+                        <option value="on-scene">On Scene</option>
+                        <option value="resolved">Resolved</option>
+                      </select>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-xs text-slate-400 mb-1">Location</label>
+                      <input
+                        type="text"
+                        value={incidentData.location}
+                        onChange={(e) => setIncidentData({ ...incidentData, location: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                        placeholder="Address"
+                      />
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-xs text-slate-400 mb-1">Description</label>
+                      <textarea
+                        value={incidentData.description}
+                        onChange={(e) => setIncidentData({ ...incidentData, description: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                        rows="3"
+                        placeholder="Incident details..."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex gap-2">
+                    <button className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition font-semibold">
+                      💾 SAVE
+                    </button>
+                    <button className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 rounded transition font-semibold">
+                      📄 EXPORT
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-700 flex items-center justify-between text-xs text-slate-500">
+              <div>System v8.0 Enhanced | Distance Measurement + Multi-Incident Tracking | Natural Language AI | 20+ Commands | Google Maps | User: COMMAND-01</div>
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                <span>Operational</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<PoliceIncidentManagement />);
+  </script>
+</body>
+</html>
